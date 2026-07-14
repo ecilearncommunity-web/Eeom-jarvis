@@ -1,0 +1,66 @@
+{
+  "collections": {
+    "users": {
+      "fields": {
+        "email": { "type": "string" },
+        "createdAt": { "type": "timestamp" },
+        "voiceName": { "type": "string" },
+        "darkMode": { "type": "boolean" },
+        "preferredModel": { "type": "string" }
+      },
+      "indexes": []
+    },
+    "notes": {
+      "fields": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "timestamp" },
+        "updatedAt": { "type": "timestamp" }
+      },
+      "indexes": [
+        {
+          "fields": [
+            { "fieldPath": "userId", "order": "ASCENDING" },
+            { "fieldPath": "updatedAt", "order": "DESCENDING" }
+          ]
+        }
+      ]
+    },
+    "chat_history": {
+      "fields": {
+        "userId": { "type": "string" },
+        "role": { "type": "string" },
+        "content": { "type": "string" },
+        "timestamp": { "type": "timestamp" }
+      },
+      "indexes": [
+        {
+          "fields": [
+            { "fieldPath": "userId", "order": "ASCENDING" },
+            { "fieldPath": "timestamp", "order": "ASCENDING" }
+          ]
+        }
+      ]
+    },
+    "scripts": {
+      "fields": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "code": { "type": "string" },
+        "createdAt": { "type": "timestamp" }
+      },
+      "indexes": [
+        {
+          "fields": [
+            { "fieldPath": "userId", "order": "ASCENDING" },
+            { "fieldPath": "createdAt", "order": "DESCENDING" }
+          ]
+        }
+      ]
+    }
+  }
+}

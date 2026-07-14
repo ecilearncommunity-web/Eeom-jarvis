@@ -1,0 +1,81 @@
+rules_version = '2';
+service cloudfirestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (default deny catch-all)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // 2. Users Collection
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create, update: if isOwner(userId)
+        && request.resource.data.keys().hasAll(['email', 'createdAt'])
+        && request.resource.data.email is string
+        && request.resource.data.email.size() <= 256;
+      allow delete: if false; // Users cannot delete profiles
+    }
+
+    // 3. Notes Collection (Keep substitute & general vault)
+    match /notes/{noteId} {
+      allow get, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 256
+        && request.resource.data.content is string
+        && request.resource.data.content.size() <= 20000;
+      allow update: if isSignedIn()
+        && resource.data.userId == request.auth.uid
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 256
+        && request.resource.data.content is string
+        && request.resource.data.content.size() <= 20000;
+    }
+
+    // 4. Chat History Collection
+    match /chat_history/{chatId} {
+      allow get, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.content is string
+        && request.resource.data.content.size() <= 20000;
+      allow update: if false; // Chat histories are immutable
+    }
+
+    // 5. Scripts Collection
+    match /scripts/{scriptId} {
+      allow get, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 256
+        && request.resource.data.code is string
+        && request.resource.data.code.size() <= 50000;
+      allow update: if isSignedIn()
+        && resource.data.userId == request.auth.uid
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 256
+        && request.resource.data.code is string
+        && request.resource.data.code.size() <= 50000;
+    }
+  }
+}
