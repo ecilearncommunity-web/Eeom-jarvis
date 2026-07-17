@@ -10,6 +10,28 @@
       },
       "indexes": []
     },
+    "users/{userId}/config": {
+      "fields": {
+        "language": { "type": "string" },
+        "geminiLiveApiKey": { "type": "string" },
+        "voicePersona": { "type": "string" },
+        "wakeWordDetection": { "type": "boolean" },
+        "subAgentModelConfig": { "type": "boolean" },
+        "aiProvider": { "type": "string" },
+        "openrouterApiKey": { "type": "string" },
+        "modelId": { "type": "string" },
+        "userName": { "type": "string" },
+        "userLocationName": { "type": "string" },
+        "userProfession": { "type": "string" },
+        "userBio": { "type": "string" },
+        "whatsAppLinkStatus": { "type": "string" },
+        "personalityTemplate": { "type": "string" },
+        "personalityPrompt": { "type": "string" },
+        "memories": { "type": "array" },
+        "customTemplates": { "type": "map" }
+      },
+      "indexes": []
+    },
     "notes": {
       "fields": {
         "userId": { "type": "string" },

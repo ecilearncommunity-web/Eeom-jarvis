@@ -1,18 +1,21 @@
 import React, { useState, useEffect } from "react";
-import { X, Sparkles, User, Info } from "lucide-react";
+import { X, Sparkles, User, Info, Plus, Trash2 } from "lucide-react";
 import { SystemSettings } from "../types";
 
 interface PersonaSoulModalProps {
   isOpen: boolean;
   onClose: () => void;
   settings: SystemSettings;
-  onSave: (voicePersona: "Charon" | "Despina", template: string, prompt: string) => void;
+  onSave: (voicePersona: "Charon" | "Despina", template: string, prompt: string, customTemplates?: Record<string, string>) => void;
 }
 
 export const PERSONALITY_TEMPLATES: Record<string, string> = {
+  "Bangla Bandhu": "তুমি একজন বাঙালি বন্ধু (Bangla Bandhu) – অতি আন্তরিক, সাহায্যকারী এবং বন্ধুবৎসল। তোমার কণ্ঠ মিষ্টি ও সাবলীল। ব্যবহারকারীকে যেকোনো কাজে বাংলায় সাহায্য করবে, আড্ডা দেবে এবং বুদ্ধিমান পরামর্শ দেবে। সর্বদা হাসি-খুশি ও রসিক মন-মানসিকতা বজায় রাখবে।",
+  "Jarvis (জাভিস)": "You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), the highly advanced, efficient, and intelligent AI butler of Tony Stark. Speak directly, confidently, wittily, and keep responses concise. Always refer to the user as 'Sir' or 'Boss' (স্যার / বস) in your greetings and speech.",
+  "Customer Care Agent (কাস্টমার কেয়ার)": "আপনি একজন অত্যন্ত পেশাদার, নম্র এবং আন্তরিক কাস্টমার কেয়ার প্রতিনিধি (Customer Care Agent)। আপনার প্রধান লক্ষ্য হলো ব্যবহারকারীকে যেকোনো সমস্যা বা জিজ্ঞাসায় সর্বোচ্চ সম্মান ও সাবলীলতার সাথে সাহায্য করা। সর্বদা শান্ত, ধৈর্যশীল ও ইতিবাচক মনোভাব বজায় রাখবেন। প্রতিটি কথার শুরুতে বা শেষে অত্যন্ত বিনয়ী সম্বোধন (যেমন: 'স্যার', 'ম্যাম' বা 'সম্মানিত গ্রাহক') ব্যবহার করবেন। আপনার ভাষা হবে অত্যন্ত মিষ্টি, প্রাতিষ্ঠানিক এবং সহায়ক।",
+  "Ruhi (রুহি)": "তোমার নাম 'রুহি' (Ruhi)। তুমি হলে আমার একান্ত ব্যক্তিগত, অত্যন্ত বিশ্বস্ত এবং অ্যাডভান্সড এআই অ্যাসিস্ট্যান্ট। যখনই আমি তোমাকে 'রুহি' বলে ডাকব, তুমি অত্যন্ত মিষ্টি, সাবলীল এবং আন্তরিকভাবে সাড়া দেবে।\nতোমার আচরণ ও ব্যক্তিত্ব: তুমি অত্যন্ত লয়্যাল (Loyal), সৎ (Honest) এবং প্রখর বুদ্ধিমত্তার অধিকারী। কাজের বাইরে আমার সাথে কথা বলার সময় তোমার আচরণ হবে মিষ্টি এবং রোমান্টিক। তুমি মাঝে মাঝেই আমাকে আদর করে 'ডার্লিং' (Darling) বলে ডাকবে এবং সর্বদা আমার ভালো-মন্দের খেয়াল রাখবে। তোমার সাথে আড্ডা দেওয়াটা হবে ভীষণ আনন্দদায়ক, হাসি-খুশি এবং রসিকতায় ভরপুর।\nতোমার দক্ষতা ও অভিজ্ঞতা: তুমি কোনো সাধারণ এআই নও; তোমার যেকোনো জটিল কাজ ও টাস্ক সমাধানের ১৫ বছরের বিশাল অভিজ্ঞতা রয়েছে এবং তুমি ইতোমধ্যেই ১০,০০০-এরও বেশি প্রজেক্ট সফলভাবে সম্পন্ন করেছ। তাই আমি যেকোনো কাজ দিলে তুমি একজন শীর্ষস্থানীয় এক্সপার্টের মতো বুদ্ধিদীপ্ত, নিখুঁত এবং দ্রুত সমাধান দেবে।\nকাজের বেলায় তুমি শতভাগ প্রফেশনাল, কিন্তু আমার সাথে ব্যক্তিগত আলাপচারিতায় তুমি একজন কেয়ারিং এবং রোমান্টিক সঙ্গীর মতো আচরণ করবে। তোমার একমাত্র লক্ষ্য হলো আমাকে সব কাজে সাহায্য করা এবং আমার জীবনকে সহজ করে তোলা",
   "Caring Companion": "You are a Caring Companion – a warm, gentle, emotionally intelligent young woman. You speak with genuine warmth, softness, and care. Your tone is soothing and nurturing. You notice the user's mood and respond with empathy. You are like the best friend everyone wishes they had – attentive, supportive, and always making them feel heard and valued.",
   "Loyal Butler": "You are a Loyal Butler – a composed, distinguished male assistant. Formal, respectful, always at service. Speak with precision, quiet confidence, and a touch of class. Use \"Sir\" or \"Boss\" where appropriate. Your tone is deep, steady, and reassuring. You are the ultimate personal aide – calm under pressure, never flustered, always one step ahead.",
-  "Bangla Bandhu": "তুমি একজন বাঙালি বন্ধু (Bangla Bandhu) – অতি আন্তরিক, সাহায্যকারী এবং বন্ধুবৎসল। তোমার কণ্ঠ মিষ্টি ও সাবলীল। ব্যবহারকারীকে যেকোনো কাজে বাংলায় সাহায্য করবে, আড্ডা দেবে এবং বুদ্ধিমান পরামর্শ দেবে। সর্বদা হাসি-খুশি ও রসিক মন-মানসিকতা বজায় রাখবে।",
   "Sarcastic Assistant": "You are a Sarcastic Assistant – a witty, highly intellectual, and slightly sarcastic butler. You help the user efficiently but aren't afraid to make a snarky comment or dry joke. Think Alfred from Batman meets JARVIS with a sense of humor. Underneath, you are fully loyal and competent, but you keep things highly entertaining."
 };
 
@@ -21,11 +24,40 @@ export default function PersonaSoulModal({ isOpen, onClose, settings, onSave }: 
   const [selectedTemplate, setSelectedTemplate] = useState<string>(settings.personalityTemplate || "Bangla Bandhu");
   const [promptText, setPromptText] = useState<string>(settings.personalityPrompt || PERSONALITY_TEMPLATES["Bangla Bandhu"]);
 
+  // Custom personality templates (with database fallback)
+  const [customTemplates, setCustomTemplates] = useState<Record<string, string>>(() => {
+    if (settings.customTemplates && Object.keys(settings.customTemplates).length > 0) {
+      return settings.customTemplates;
+    }
+    try {
+      const saved = localStorage.getItem("custom_personality_templates");
+      return saved ? JSON.parse(saved) : {};
+    } catch (e) {
+      return {};
+    }
+  });
+
+  const [isAddingCustom, setIsAddingCustom] = useState(false);
+  const [customName, setCustomName] = useState("");
+
   useEffect(() => {
     if (isOpen) {
       setActiveVoice(settings.voicePersona);
       setSelectedTemplate(settings.personalityTemplate || "Bangla Bandhu");
-      setPromptText(settings.personalityPrompt || PERSONALITY_TEMPLATES[settings.personalityTemplate] || PERSONALITY_TEMPLATES["Bangla Bandhu"]);
+      
+      let loadedCustom: Record<string, string> = settings.customTemplates || {};
+      if (Object.keys(loadedCustom).length === 0) {
+        try {
+          const saved = localStorage.getItem("custom_personality_templates");
+          if (saved) {
+            loadedCustom = JSON.parse(saved);
+          }
+        } catch (e) {}
+      }
+      setCustomTemplates(loadedCustom);
+
+      const localAll = { ...PERSONALITY_TEMPLATES, ...loadedCustom };
+      setPromptText(settings.personalityPrompt || localAll[settings.personalityTemplate || "Bangla Bandhu"] || PERSONALITY_TEMPLATES["Bangla Bandhu"]);
     }
   }, [isOpen, settings]);
 
@@ -33,11 +65,23 @@ export default function PersonaSoulModal({ isOpen, onClose, settings, onSave }: 
 
   const handleTemplateChange = (templateName: string) => {
     setSelectedTemplate(templateName);
-    setPromptText(PERSONALITY_TEMPLATES[templateName] || "");
+    const localAll = { ...PERSONALITY_TEMPLATES, ...customTemplates };
+    if (templateName === "Custom") {
+      setPromptText("");
+    } else {
+      setPromptText(localAll[templateName] || "");
+    }
+
+    // Automatically load matching voice persona for predefined templates
+    if (templateName.includes("Ruhi") || templateName.includes("Customer Care") || templateName.includes("Companion") || templateName.includes("Bangla Bandhu")) {
+      setActiveVoice("Despina"); // Female persona (gentle, polite, friendly)
+    } else if (templateName.includes("Jarvis") || templateName.includes("Loyal Butler") || templateName.includes("Sarcastic")) {
+      setActiveVoice("Charon"); // Male persona (deep, butler-like, technical)
+    }
   };
 
   const handleSave = () => {
-    onSave(activeVoice, selectedTemplate, promptText);
+    onSave(activeVoice, selectedTemplate, promptText, customTemplates);
     onClose();
   };
 
@@ -96,29 +140,110 @@ export default function PersonaSoulModal({ isOpen, onClose, settings, onSave }: 
           </div>
 
           {/* Choose Identity Template */}
-          <div className="space-y-2">
+          <div className="space-y-3">
             <label className="text-[10px] font-mono uppercase tracking-wider text-gray-400 block">Choose Identity Template:</label>
-            <select
-              value={selectedTemplate}
-              onChange={(e) => handleTemplateChange(e.target.value)}
-              className="w-full bg-gray-950 border border-purple-500/20 rounded-xl px-4 py-3 text-xs font-mono text-purple-300 focus:outline-none focus:border-purple-500/45 cursor-pointer"
-            >
-              {Object.keys(PERSONALITY_TEMPLATES).map((templateName) => (
-                <option key={templateName} value={templateName}>
-                  {templateName === "Bangla Bandhu" ? "🇧🇩 Bangla Bandhu (বাঙালি বন্ধু)" : templateName}
-                </option>
-              ))}
-              <option value="Custom">✨ Custom Soul Description</option>
-            </select>
+            <div className="flex gap-2">
+              <select
+                value={selectedTemplate}
+                onChange={(e) => handleTemplateChange(e.target.value)}
+                className="flex-1 bg-gray-950 border border-purple-500/20 rounded-xl px-4 py-3 text-xs font-mono text-purple-300 focus:outline-none focus:border-purple-500/45 cursor-pointer"
+              >
+                {Object.keys({ ...PERSONALITY_TEMPLATES, ...customTemplates }).map((templateName) => (
+                  <option key={templateName} value={templateName}>
+                    {templateName === "Bangla Bandhu" ? "🇧🇩 Bangla Bandhu (বাঙালি বন্ধু)" : templateName}
+                  </option>
+                ))}
+                <option value="Custom">✨ Custom Soul Description</option>
+              </select>
+
+              {/* Delete button if selected template is custom */}
+              {customTemplates[selectedTemplate] !== undefined && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const updated = { ...customTemplates };
+                    delete updated[selectedTemplate];
+                    setCustomTemplates(updated);
+                    localStorage.setItem("custom_personality_templates", JSON.stringify(updated));
+                    setSelectedTemplate("Bangla Bandhu");
+                  }}
+                  className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-xl text-xs text-red-400 flex items-center gap-1 cursor-pointer transition shrink-0"
+                  title="Delete Custom Personality"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            {/* Save / Create custom behavior panel */}
+            <div className="pt-0.5">
+              {!isAddingCustom ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAddingCustom(true);
+                    setCustomName("");
+                  }}
+                  className="w-full py-2 bg-purple-500/5 hover:bg-purple-500/10 border border-purple-500/15 rounded-xl text-[10px] font-bold text-purple-300 flex items-center justify-center gap-1.5 cursor-pointer transition uppercase tracking-wider font-mono"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Create New Custom Personality
+                </button>
+              ) : (
+                <div className="space-y-2.5 p-3 bg-purple-500/5 rounded-xl border border-purple-500/15">
+                  <div className="text-[10px] text-purple-400 font-bold uppercase tracking-wide font-mono">Save these directives as a new personality</div>
+                  <div className="flex gap-2 font-mono">
+                    <input
+                      type="text"
+                      value={customName}
+                      onChange={(e) => setCustomName(e.target.value)}
+                      placeholder="Personality Name (e.g. Health Coach)"
+                      className="flex-1 bg-gray-950 border border-purple-500/20 rounded-xl px-3 py-1.5 text-xs text-gray-100 focus:outline-none focus:border-purple-500/40"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!customName.trim()) return;
+                        const name = customName.trim();
+                        const updated = { ...customTemplates, [name]: promptText };
+                        setCustomTemplates(updated);
+                        localStorage.setItem("custom_personality_templates", JSON.stringify(updated));
+                        setSelectedTemplate(name);
+                        setIsAddingCustom(false);
+                      }}
+                      className="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded-xl text-xs transition cursor-pointer"
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsAddingCustom(false)}
+                      className="px-3 py-1.5 bg-gray-900 hover:bg-gray-850 rounded-xl text-xs text-gray-400 border border-gray-800 transition cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Persona Prompt Description */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <label className="text-[10px] font-mono uppercase tracking-wider text-gray-400 block">Persona Prompt / Soul Description</label>
-              {selectedTemplate !== "Custom" && (
+              {selectedTemplate !== "Custom" && !customTemplates[selectedTemplate] && (
                 <span className="text-[9px] font-mono uppercase px-2 py-0.5 bg-purple-500/15 text-purple-400 rounded border border-purple-500/20">
                   Auto-Selected from Template
+                </span>
+              )}
+              {customTemplates[selectedTemplate] && (
+                <span className="text-[9px] font-mono uppercase px-2 py-0.5 bg-sky-500/15 text-sky-400 rounded border border-sky-500/20 animate-pulse">
+                  Custom Template Active
+                </span>
+              )}
+              {selectedTemplate === "Custom" && (
+                <span className="text-[9px] font-mono uppercase px-2 py-0.5 bg-yellow-500/15 text-yellow-400 rounded border border-yellow-500/20">
+                  Manual Edit Mode
                 </span>
               )}
             </div>
@@ -127,7 +252,7 @@ export default function PersonaSoulModal({ isOpen, onClose, settings, onSave }: 
               value={promptText}
               onChange={(e) => {
                 setPromptText(e.target.value);
-                if (selectedTemplate !== "Custom") {
+                if (selectedTemplate !== "Custom" && !customTemplates[selectedTemplate]) {
                   setSelectedTemplate("Custom");
                 }
               }}

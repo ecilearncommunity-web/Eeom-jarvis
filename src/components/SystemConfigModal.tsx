@@ -667,12 +667,13 @@ export default function SystemConfigModal({ isOpen, onClose, settings, userEmail
         isOpen={isSoulOpen}
         onClose={() => setIsSoulOpen(false)}
         settings={formData}
-        onSave={(voice, template, prompt) => {
+        onSave={(voice, template, prompt, customTemplates) => {
           setFormData({
             ...formData,
             voicePersona: voice,
             personalityTemplate: template,
-            personalityPrompt: prompt
+            personalityPrompt: prompt,
+            customTemplates: customTemplates || formData.customTemplates
           });
         }}
       />

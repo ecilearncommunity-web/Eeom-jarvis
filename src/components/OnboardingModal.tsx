@@ -26,6 +26,32 @@ export default function OnboardingModal({ isOpen, onSave }: OnboardingModalProps
   const [selectedVoice, setSelectedVoice] = useState<"Charon" | "Despina">("Despina");
   const [selectedTemplate, setSelectedTemplate] = useState<string>("Bangla Bandhu");
   
+  // Custom Personality Templates Management
+  const [customTemplates, setCustomTemplates] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem("custom_personality_templates");
+      return saved ? JSON.parse(saved) : {};
+    } catch (e) {
+      return {};
+    }
+  });
+
+  const [promptText, setPromptText] = useState<string>(() => {
+    const all = { ...PERSONALITY_TEMPLATES, ...customTemplates };
+    return all["Bangla Bandhu"];
+  });
+
+  const [isAddingCustom, setIsAddingCustom] = useState(false);
+  const [customName, setCustomName] = useState("");
+
+  // Sync prompt text when selected template changes
+  React.useEffect(() => {
+    const all = { ...PERSONALITY_TEMPLATES, ...customTemplates };
+    if (all[selectedTemplate] !== undefined) {
+      setPromptText(all[selectedTemplate]);
+    }
+  }, [selectedTemplate, customTemplates]);
+  
   // Profile details
   const [userName, setUserName] = useState("");
   const [userProfession, setUserProfession] = useState("");
@@ -58,12 +84,13 @@ export default function OnboardingModal({ isOpen, onSave }: OnboardingModalProps
       language: selectedLang,
       voicePersona: selectedVoice,
       personalityTemplate: selectedTemplate,
-      personalityPrompt: PERSONALITY_TEMPLATES[selectedTemplate] || PERSONALITY_TEMPLATES["Bangla Bandhu"],
+      personalityPrompt: promptText,
       userName: userName.trim() || "Boss",
       userProfession: userProfession.trim() || "Business Owner",
       userLocationName: userLocation.trim() || "Dhaka, Bangladesh",
       userBio: userBio.trim() || "Owner of a growing digital enterprise.",
-      memories: memories
+      memories: memories,
+      customTemplates: customTemplates
     });
   };
 
@@ -190,25 +217,115 @@ export default function OnboardingModal({ isOpen, onSave }: OnboardingModalProps
               </div>
 
               {/* Personality Soul */}
-              <div className="space-y-2">
+              <div className="space-y-3">
                 <label className="text-[10px] uppercase tracking-wider text-sky-400 flex items-center gap-1.5 font-bold">
                   <Sparkles className="w-3.5 h-3.5" />
                   <span>3. Choose Character Soul / বুদ্ধিমত্তা ও আচরণ</span>
                 </label>
-                <select
-                  value={selectedTemplate}
-                  onChange={(e) => setSelectedTemplate(e.target.value)}
-                  className="w-full bg-gray-950 border border-sky-500/20 rounded-xl px-3 py-2 text-xs text-sky-300 focus:outline-none focus:border-sky-500/45 cursor-pointer"
-                >
-                  {Object.keys(PERSONALITY_TEMPLATES).map((templateName) => (
-                    <option key={templateName} value={templateName}>
-                      {templateName === "Bangla Bandhu" ? "🇧🇩 Bangla Bandhu (বাঙালি বন্ধু)" : templateName}
-                    </option>
-                  ))}
-                </select>
-                <div className="bg-gray-950/60 p-3 rounded-xl border border-sky-500/5 text-[10px] text-gray-400 leading-normal max-h-20 overflow-y-auto">
-                  <span className="text-sky-400 font-bold">Directives: </span>
-                  {PERSONALITY_TEMPLATES[selectedTemplate]}
+                <div className="flex gap-2">
+                  <select
+                    value={selectedTemplate}
+                    onChange={(e) => setSelectedTemplate(e.target.value)}
+                    className="flex-1 bg-gray-950 border border-sky-500/20 rounded-xl px-3 py-2 text-xs text-sky-300 focus:outline-none focus:border-sky-500/45 cursor-pointer"
+                  >
+                    {Object.keys({ ...PERSONALITY_TEMPLATES, ...customTemplates }).map((templateName) => (
+                      <option key={templateName} value={templateName}>
+                        {templateName === "Bangla Bandhu" ? "🇧🇩 Bangla Bandhu (বাঙালি বন্ধু)" : templateName}
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* Delete button if selected template is custom */}
+                  {customTemplates[selectedTemplate] !== undefined && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const updated = { ...customTemplates };
+                        delete updated[selectedTemplate];
+                        setCustomTemplates(updated);
+                        localStorage.setItem("custom_personality_templates", JSON.stringify(updated));
+                        setSelectedTemplate("Bangla Bandhu");
+                      }}
+                      className="px-3 py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-xl text-xs text-red-400 flex items-center gap-1 cursor-pointer transition shrink-0"
+                      title="Delete Custom Personality"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Directives text area (Fully Editable as requested) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-sky-400 font-bold">Directives / আচরণ নির্দেশাবলী:</span>
+                    {customTemplates[selectedTemplate] ? (
+                      <span className="text-[9px] text-green-400 uppercase font-bold tracking-wider px-2 py-0.5 bg-green-500/10 rounded border border-green-500/20">
+                        Custom Soul Created By You
+                      </span>
+                    ) : (
+                      <span className="text-[9px] text-gray-500">Edit instructions to customize this soul</span>
+                    )}
+                  </div>
+                  <textarea
+                    rows={4}
+                    value={promptText}
+                    onChange={(e) => {
+                      setPromptText(e.target.value);
+                    }}
+                    placeholder="Describe the personality details..."
+                    className="w-full bg-gray-950 border border-sky-500/15 rounded-xl p-3 text-xs text-gray-200 focus:outline-none focus:border-sky-500/40 resize-none font-sans leading-relaxed"
+                  />
+                </div>
+
+                {/* Add Custom behavior panel */}
+                <div className="pt-1">
+                  {!isAddingCustom ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsAddingCustom(true);
+                        setCustomName("");
+                      }}
+                      className="w-full py-2 bg-sky-500/5 hover:bg-sky-500/10 border border-sky-500/15 rounded-xl text-[10px] font-bold text-sky-300 flex items-center justify-center gap-1.5 cursor-pointer transition uppercase tracking-wider"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Add New Custom Personality / নতুন আচরণ তৈরি করুন
+                    </button>
+                  ) : (
+                    <div className="space-y-2.5 p-3 bg-sky-500/5 rounded-xl border border-sky-500/15">
+                      <div className="text-[10px] text-sky-400 font-bold uppercase tracking-wide">Save these directives as a new personality</div>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={customName}
+                          onChange={(e) => setCustomName(e.target.value)}
+                          placeholder="Personality Name (e.g. Special Advisor)"
+                          className="flex-1 bg-gray-950 border border-sky-500/20 rounded-xl px-3 py-1.5 text-xs text-gray-100 focus:outline-none focus:border-sky-500/40"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!customName.trim()) return;
+                            const name = customName.trim();
+                            const updated = { ...customTemplates, [name]: promptText };
+                            setCustomTemplates(updated);
+                            localStorage.setItem("custom_personality_templates", JSON.stringify(updated));
+                            setSelectedTemplate(name);
+                            setIsAddingCustom(false);
+                          }}
+                          className="px-4 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-xl text-xs transition cursor-pointer"
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setIsAddingCustom(false)}
+                          className="px-3 py-1.5 bg-gray-900 hover:bg-gray-850 rounded-xl text-xs text-gray-400 border border-gray-800 transition cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

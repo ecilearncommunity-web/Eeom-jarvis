@@ -12,6 +12,7 @@ dotenv.config();
 
 // Ensure global WebSocket is available in Node.js for modern isomorphic SDKs like @google/genai Live Client
 (global as any).WebSocket = WebSocket;
+(globalThis as any).WebSocket = WebSocket;
 
 const app = express();
 const PORT = 3000;
@@ -20,23 +21,98 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // Lazy initialization of Gemini Client for stability
-let aiClient: GoogleGenAI | null = null;
-function getGeminiClient(): GoogleGenAI {
-  if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+let defaultAiClient: GoogleGenAI | null = null;
+let backupAiClient: GoogleGenAI | null = null;
+
+function getGeminiClient(customApiKey?: string): GoogleGenAI {
+  const trimmedKey = customApiKey?.trim();
+  
+  // 1. If no custom API key is passed, determine the default key to use
+  if (!trimmedKey) {
+    let defaultKey = process.env.GEMINI_API_KEY;
+    if (!defaultKey && process.env.GEMINI_API_KEY_BAC) {
+      console.info("Using process.env.GEMINI_API_KEY_BAC as default key fallback...");
+      defaultKey = process.env.GEMINI_API_KEY_BAC;
+    }
+    
+    if (!defaultKey) {
       throw new Error("GEMINI_API_KEY is missing. Please configure it in the Secrets panel in the Settings menu of the Google AI Studio UI.");
     }
-    aiClient = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
+    
+    if (!defaultAiClient) {
+      defaultAiClient = new GoogleGenAI({
+        apiKey: defaultKey,
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
         },
-      },
-    });
+      });
+    }
+    return defaultAiClient;
   }
-  return aiClient;
+
+  // 2. If the custom key is exactly process.env.GEMINI_API_KEY
+  if (process.env.GEMINI_API_KEY && trimmedKey === process.env.GEMINI_API_KEY.trim()) {
+    if (!defaultAiClient) {
+      defaultAiClient = new GoogleGenAI({
+        apiKey: process.env.GEMINI_API_KEY,
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
+        },
+      });
+    }
+    return defaultAiClient;
+  }
+
+  // 3. If the custom key is exactly process.env.GEMINI_API_KEY_BAC
+  if (process.env.GEMINI_API_KEY_BAC && trimmedKey === process.env.GEMINI_API_KEY_BAC.trim()) {
+    if (!backupAiClient) {
+      backupAiClient = new GoogleGenAI({
+        apiKey: process.env.GEMINI_API_KEY_BAC,
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
+        },
+      });
+    }
+    return backupAiClient;
+  }
+
+  // 4. Any other custom API key provided by the user in-app (dynamic client creation)
+  return new GoogleGenAI({
+    apiKey: trimmedKey,
+    httpOptions: {
+      headers: {
+        "User-Agent": "aistudio-build",
+      },
+    },
+  });
+}
+
+// Wrapper function to automatically fallback to GEMINI_API_KEY_BAC if a rate limit/quota error is detected on the primary key, and the user hasn't provided a custom key
+async function generateContentWithFallback(
+  ai: GoogleGenAI,
+  options: { model: string; contents: any; config?: any },
+  customKey?: string
+) {
+  try {
+    return await ai.models.generateContent(options);
+  } catch (err: any) {
+    const isQuotaError = (e: any) => {
+      const msg = (e?.message || "").toLowerCase();
+      return msg.includes("quota") || msg.includes("exhausted") || msg.includes("429") || msg.includes("limit");
+    };
+    if (isQuotaError(err) && process.env.GEMINI_API_KEY_BAC && !customKey) {
+      console.info("Quota exceeded on primary key during generateContent. Retrying with backup key...");
+      const backupAi = getGeminiClient(process.env.GEMINI_API_KEY_BAC);
+      return await backupAi.models.generateContent(options);
+    }
+    throw err;
+  }
 }
 
 const JARVIS_SYSTEM_INSTRUCTION = `You are JARVIS (Just A Rather Very Intelligent System), the highly advanced, efficient, and intelligent AI butler and assistant of Tony Stark (Iron Man). 
@@ -91,13 +167,124 @@ app.post("/api/assistant/log", requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
+// ---------------------- YOUTUBE SCRAPER & SEARCH API ----------------------
+
+function parseYoutubeVideos(html: string) {
+  const videos: any[] = [];
+  const parts = html.split('"videoRenderer":');
+  
+  for (let i = 1; i < parts.length && videos.length < 10; i++) {
+    const part = parts[i];
+    
+    // Extract videoId
+    const videoIdMatch = part.match(/"videoId"\s*:\s*"([^"]+)"/);
+    if (!videoIdMatch) continue;
+    const videoId = videoIdMatch[1];
+    
+    // Extract title
+    let title = "";
+    const titlePart = part.split('"title":')[1];
+    if (titlePart) {
+      const textMatch = titlePart.match(/"text"\s*:\s*"([^"]+)"/);
+      if (textMatch) {
+        try {
+          // Replace escaped quotes and backslashes
+          const cleanText = textMatch[1].replace(/\\"/g, '"');
+          title = JSON.parse(`"${cleanText}"`);
+        } catch {
+          title = textMatch[1];
+        }
+      }
+    }
+    
+    // Extract channel/author
+    let channel = "";
+    const ownerPart = part.split('"ownerText":')[1] || part.split('"longBylineText":')[1];
+    if (ownerPart) {
+      const channelMatch = ownerPart.match(/"text"\s*:\s*"([^"]+)"/);
+      if (channelMatch) {
+        try {
+          const cleanChannel = channelMatch[1].replace(/\\"/g, '"');
+          channel = JSON.parse(`"${cleanChannel}"`);
+        } catch {
+          channel = channelMatch[1];
+        }
+      }
+    }
+    
+    // Extract duration
+    let duration = "";
+    const lengthPart = part.split('"lengthText":')[1];
+    if (lengthPart) {
+      const lenMatch = lengthPart.match(/"simpleText"\s*:\s*"([^"]+)"/);
+      if (lenMatch) {
+        duration = lenMatch[1];
+      }
+    }
+
+    let thumbnail = `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`;
+    
+    videos.push({
+      videoId,
+      title: title || "YouTube Video",
+      channel: channel || "YouTube Creator",
+      duration: duration || "Live/Unknown",
+      thumbnail
+    });
+  }
+  return videos;
+}
+
+app.get("/api/youtube/search", async (req, res) => {
+  try {
+    const query = req.query.q as string;
+    if (!query) {
+      return res.status(400).json({ error: "Missing query parameter 'q'" });
+    }
+
+    const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`YouTube responded with status ${response.status}`);
+    }
+
+    const html = await response.text();
+    let videos = parseYoutubeVideos(html);
+
+    // Fallback if scraping didn't find any well-structured videoRenderers
+    if (videos.length === 0) {
+      const watchMatches = html.matchAll(/\/watch\?v=([a-zA-Z0-9_-]{11})/g);
+      const uniqueIds = Array.from(new Set(Array.from(watchMatches).map(m => m[1]))).slice(0, 5);
+      
+      videos = uniqueIds.map(id => ({
+        videoId: id,
+        title: `${query} (Search Result)`,
+        channel: "YouTube",
+        duration: "Stream",
+        thumbnail: `https://img.youtube.com/vi/${id}/mqdefault.jpg`
+      }));
+    }
+
+    res.json({ videos });
+  } catch (error: any) {
+    console.error("YouTube search backend error:", error);
+    res.status(500).json({ error: error.message, videos: [] });
+  }
+});
+
 // ---------------------- GEMINI API ENDPOINTS ----------------------
 
 // Multi-turn chat with Jarvis
 app.post("/api/gemini/chat", async (req, res) => {
   try {
     const { messages, model, thinkingMode, grounding, userLocation, language, customSystemInstruction } = req.body;
-    const ai = getGeminiClient();
+    const customKey = req.headers["x-gemini-api-key"] as string | undefined;
+    const ai = getGeminiClient(customKey);
 
     let selectedModel = model || "gemini-3.5-flash";
     if (thinkingMode) {
@@ -105,9 +292,79 @@ app.post("/api/gemini/chat", async (req, res) => {
     }
 
     let sysInstruction = customSystemInstruction || JARVIS_SYSTEM_INSTRUCTION;
+    
+    // Inject precise real-time temporal context (forcing year 2026 to fix outdated model responses)
+    const containerTime = new Date();
+    const targetDate = new Date(containerTime);
+    if (targetDate.getFullYear() < 2026) {
+      targetDate.setFullYear(2026);
+    }
+
+    const formatInTZ = (date: Date, timeZone: string, options: Intl.DateTimeFormatOptions) => {
+      try {
+        return date.toLocaleString("en-US", { ...options, timeZone });
+      } catch (e) {
+        return date.toLocaleString("en-US", options);
+      }
+    };
+
+    const bstDate = formatInTZ(targetDate, "Asia/Dhaka", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+    const bstTime = formatInTZ(targetDate, "Asia/Dhaka", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
+
+    const pdtDate = formatInTZ(targetDate, "America/Los_Angeles", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+    const pdtTime = formatInTZ(targetDate, "America/Los_Angeles", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
+
+    const utcDate = formatInTZ(targetDate, "UTC", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+    const utcTime = formatInTZ(targetDate, "UTC", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
+
+    sysInstruction += `\n\nCRITICAL REAL-TIME TEMPORAL CONTEXT (YEAR 2026):
+- Bangladesh Standard Time (BST, Asia/Dhaka): Today is ${bstDate}, Current Time: ${bstTime}
+- Pacific Standard Time (PST/PDT, America/Los_Angeles): Today is ${pdtDate}, Current Time: ${pdtTime}
+- Universal Time (UTC): Today is ${utcDate}, Current Time: ${utcTime}
+- Year check: The current year is 2026.
+- Directives:
+  1. The user resides in Bangladesh. When they ask "আজকে কি বার?", "বাংলাদেশের সময় কত?", "বাংলাদেশ সময় কত?" or similar, you MUST answer based on the "Bangladesh Standard Time" context above (i.e., today is ${bstDate}, time is ${bstTime}).
+  2. If the user asks about the gold price (XAU/USD), currency exchange rates, live share market index, or recent 2026 global news, you MUST use the googleSearch tool to perform a Google Search query for the absolute latest 2026 rates (e.g. search "current gold rate XAU USD 2026"). Reply with the actual current rates fetched and cite the sources.`;
+
     if (language) {
       sysInstruction += `\n\nCRITICAL: Please respond and speak in the language: ${language}. If the user speaks in ${language} or English, understand it and reply in ${language}.`;
     }
+
+    const tools: any[] = [];
+    const lastMessage = messages && messages.length > 0 ? messages[messages.length - 1] : null;
+    const lastContent = lastMessage ? (lastMessage.content || lastMessage.text || "").toLowerCase() : "";
+
+    const searchKeywords = [
+      "search", "find", "google", "news", "weather", "today", "live", "browse", "internet", "website", "current", "latest", "recent", "time", "date", "gold", "xau", "rate", "price", "stock", "market",
+      "সার্চ", "খবর", "আজকের", "লাইভ", "আবহাওয়া", "ব্রাউজ", "ইন্টারনেট", "ওয়েবসাইট", "খোজ", "খোঁজ", "সময়", "তারিখ", "স্বর্ণ", "সোনা", "দাম", "প্রাইজ", "প্রাইস", "রেট", "শেয়ার", "মার্কেট"
+    ];
+
+    const needsSearch = searchKeywords.some(kw => lastContent.includes(kw));
+
+    if (grounding === "search" || needsSearch || grounding === "none" || !grounding) {
+      if (grounding !== "maps") {
+        tools.push({ googleSearch: {} });
+        sysInstruction += `\n\nREAL-TIME DATA DIRECTIVE:\n- You are connected to Google Search in real-time.\n- Whenever the user asks about recent events, current weather, latest news, market trends, stock prices, international updates, e-commerce products, or any live information, you MUST use Google Search to fetch and verify the absolute latest facts.\n- NEVER use old or outdated pre-trained knowledge if the user expects live data. Bring details from actual websites and cite them naturally.`;
+      }
+    }
+
+    // Custom play_video_on_screen tool for dynamic video playback on screen
+    const playVideoFunctionDeclaration = {
+      name: "play_video_on_screen",
+      description: "Plays a YouTube video or music track on the screen matching a search query or song name.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          query: {
+            type: "STRING",
+            description: "The name of the song, artist, video or search query to play on the YouTube player widget, e.g. Heeriye song."
+          }
+        },
+        required: ["query"]
+      }
+    };
+
+    tools.push({ functionDeclarations: [playVideoFunctionDeclaration] });
 
     const config: any = {
       systemInstruction: sysInstruction,
@@ -120,10 +377,7 @@ app.post("/api/gemini/chat", async (req, res) => {
       config.thinkingLevel = "HIGH";
     }
 
-    const tools: any[] = [];
-    if (grounding === "search") {
-      tools.push({ googleSearch: {} });
-    } else if (grounding === "maps") {
+    if (grounding === "maps") {
       tools.push({ googleMaps: {} });
       if (userLocation) {
         config.toolConfig = {
@@ -139,6 +393,9 @@ app.post("/api/gemini/chat", async (req, res) => {
 
     if (tools.length > 0) {
       config.tools = tools;
+      config.toolConfig = {
+        includeServerSideToolInvocations: true
+      };
     }
 
     const contents = messages.map((m: any) => {
@@ -160,33 +417,55 @@ app.post("/api/gemini/chat", async (req, res) => {
 
     let response;
     try {
-      response = await ai.models.generateContent({
+      response = await generateContentWithFallback(ai, {
         model: selectedModel,
         contents: contents,
         config: config,
-      });
+      }, customKey);
     } catch (apiError: any) {
       console.warn("Primary chat model call failed, checking fallback:", apiError);
-      if (selectedModel !== "gemini-3.5-flash") {
+      
+      if (selectedModel !== "gemini-3.5-flash" && selectedModel !== "gemini-3.1-flash-lite") {
         console.info("Falling back to gemini-3.5-flash...");
         selectedModel = "gemini-3.5-flash";
         if (config.thinkingConfig) delete config.thinkingConfig;
         if (config.thinkingLevel) delete config.thinkingLevel;
         
-        response = await ai.models.generateContent({
+        try {
+          response = await generateContentWithFallback(ai, {
+            model: selectedModel,
+            contents: contents,
+            config: config,
+          }, customKey);
+        } catch (fallbackError: any) {
+          console.warn("Fallback to gemini-3.5-flash failed, checking further fallback to gemini-3.1-flash-lite:", fallbackError);
+          selectedModel = "gemini-3.1-flash-lite";
+          response = await generateContentWithFallback(ai, {
+            model: selectedModel,
+            contents: contents,
+            config: config,
+          }, customKey);
+        }
+      } else if (selectedModel === "gemini-3.5-flash") {
+        // If gemini-3.5-flash was selected and failed (e.g., quota exceeded), fall back to gemini-3.1-flash-lite
+        console.info("gemini-3.5-flash failed, trying gemini-3.1-flash-lite as secondary resilient fallback...");
+        selectedModel = "gemini-3.1-flash-lite";
+        response = await generateContentWithFallback(ai, {
           model: selectedModel,
           contents: contents,
           config: config,
-        });
+        }, customKey);
       } else {
         throw apiError;
       }
     }
 
     const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || null;
+    const functionCalls = response.functionCalls || null;
 
     res.json({
-      text: response.text,
+      text: response.text || "",
+      functionCalls,
       groundingChunks,
       modelUsed: selectedModel,
     });
@@ -194,7 +473,21 @@ app.post("/api/gemini/chat", async (req, res) => {
     console.error("Gemini Chat Error:", error);
     let errMsg = error.message || "An error occurred during generation.";
     if (errMsg.toLowerCase().includes("quota") || errMsg.toLowerCase().includes("exhausted") || errMsg.toLowerCase().includes("429") || errMsg.toLowerCase().includes("limit")) {
-      errMsg = "Sir, we have exceeded the central grid's Gemini API quota limit (429 RESOURCE_EXHAUSTED). To resolve this, you can configure your own API key under Settings > Secrets, or please try again later once the reset window passes.";
+      errMsg = `⚠️ সেন্ট্রাল গ্রিড এপিআই কোটা শেষ (API QUOTA EXHAUSTED) ⚠️
+
+দুঃখিত স্যার, আমাদের শেয়ারড ফ্রি এপিআই কোটা লিমিট শেষ হয়ে গেছে। আপনি সম্পূর্ণ বিনামূল্যে আপনার নিজস্ব API Key তৈরি করে এটি সহজে সমাধান করতে পারেন:
+১. Google AI Studio ওয়েবসাইটে যান: https://aistudio.google.com/ এবং একটি ফ্রি Gemini API Key তৈরি করুন।
+২. এই অ্যাপ্লিকেশনের ডানদিকের উপরে Settings (গিয়ার আইকন ⚙️)-এ ক্লিক করুন।
+৩. Voice Assistant ট্যাবের অধীনে "🔑 GEMINI LIVE API KEY" ইনপুটে আপনার এপিআই কি-টি পেস্ট করুন।
+৪. নিচে স্ক্রল করে "Save System Config" বাটনে ক্লিক করুন।
+
+------------------
+
+Sir, the shared free API quota limit has been exceeded. To resolve this, configure your own free Gemini API key:
+1. Go to Google AI Studio (https://aistudio.google.com/) and create a free API key.
+2. Click the Settings gear icon (⚙️) on the top-right in this app.
+3. Paste your key in the "🔑 GEMINI LIVE API KEY" input under the "Voice Assistant" tab.
+4. Scroll down and click "Save System Config".`;
     }
     res.status(500).json({ error: errMsg });
   }
@@ -204,10 +497,11 @@ app.post("/api/gemini/chat", async (req, res) => {
 app.post("/api/gemini/tts", async (req, res) => {
   try {
     const { text, voiceName, language } = req.body;
-    const ai = getGeminiClient();
+    const customKey = req.headers["x-gemini-api-key"] as string | undefined;
+    const ai = getGeminiClient(customKey);
 
     const targetLang = language || "English";
-    const response = await ai.models.generateContent({
+    const response = await generateContentWithFallback(ai, {
       model: "gemini-3.1-flash-tts-preview",
       contents: [{ parts: [{ text: `Speak in a polite, highly helpful, butler-like ${targetLang} voice: ${text}` }] }],
       config: {
@@ -218,7 +512,7 @@ app.post("/api/gemini/tts", async (req, res) => {
           },
         },
       },
-    });
+    }, customKey);
 
     const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (base64Audio) {
@@ -230,7 +524,11 @@ app.post("/api/gemini/tts", async (req, res) => {
     console.error("Gemini TTS Error:", error);
     let errMsg = error.message || "An error occurred during TTS generation.";
     if (errMsg.toLowerCase().includes("quota") || errMsg.toLowerCase().includes("exhausted") || errMsg.toLowerCase().includes("429") || errMsg.toLowerCase().includes("limit")) {
-      errMsg = "Sir, we have exceeded the central grid's Gemini API quota limit (429 RESOURCE_EXHAUSTED) for speech generation. Please configure your own API key in Settings > Secrets or try again later.";
+      errMsg = `⚠️ সেন্ট্রাল গ্রিড স্পিচ কোটা শেষ (TTS QUOTA EXHAUSTED) ⚠️
+
+দুঃখিত স্যার, আমাদের শেয়ারড স্পিচ এপিআই কোটা লিমিট শেষ হয়ে গেছে। দয়া করে সেটিংস (গিয়ার আইকন ⚙️) থেকে আপনার নিজস্ব API Key যোগ করুন।
+
+Sir, speech API quota limit exceeded. Please configure your own Gemini API key in System Settings (gear icon ⚙️) to continue.`;
     }
     res.status(500).json({ error: errMsg });
   }
@@ -240,7 +538,8 @@ app.post("/api/gemini/tts", async (req, res) => {
 app.post("/api/gemini/image", async (req, res) => {
   try {
     const { prompt, model, aspectRatio, imageSize, base64Image, mimeType } = req.body;
-    const ai = getGeminiClient();
+    const customKey = req.headers["x-gemini-api-key"] as string | undefined;
+    const ai = getGeminiClient(customKey);
 
     const selectedModel = model || "gemini-3.1-flash-image";
 
@@ -262,11 +561,11 @@ app.post("/api/gemini/image", async (req, res) => {
       },
     };
 
-    const response = await ai.models.generateContent({
+    const response = await generateContentWithFallback(ai, {
       model: selectedModel,
       contents: { parts },
       config: config,
-    });
+    }, customKey);
 
     let imageUrl: string | null = null;
     let fallbackText: string | null = null;
@@ -291,7 +590,11 @@ app.post("/api/gemini/image", async (req, res) => {
     console.error("Gemini Image Gen Error:", error);
     let errMsg = error.message || "An error occurred during image generation.";
     if (errMsg.toLowerCase().includes("quota") || errMsg.toLowerCase().includes("exhausted") || errMsg.toLowerCase().includes("429") || errMsg.toLowerCase().includes("limit")) {
-      errMsg = "Sir, we have exceeded the central grid's Gemini API quota limit (429 RESOURCE_EXHAUSTED) for image generation. Please configure your own API key in Settings > Secrets or try again later.";
+      errMsg = `⚠️ সেন্ট্রাল গ্রিড ইমেজ কোটা শেষ (IMAGE GEN QUOTA EXHAUSTED) ⚠️
+
+দুঃখিত স্যার, আমাদের শেয়ারড ইমেজ জেনারেট এপিআই কোটা লিমিট শেষ হয়ে গেছে। দয়া করে সেটিংস (গিয়ার আইকন ⚙️) থেকে আপনার নিজস্ব API Key যোগ করুন।
+
+Sir, image generation API quota limit exceeded. Please configure your own Gemini API key in System Settings (gear icon ⚙️) to continue.`;
     }
     res.status(500).json({ error: errMsg });
   }
@@ -301,9 +604,10 @@ app.post("/api/gemini/image", async (req, res) => {
 app.post("/api/gemini/transcribe", async (req, res) => {
   try {
     const { base64Audio, mimeType } = req.body;
-    const ai = getGeminiClient();
+    const customKey = req.headers["x-gemini-api-key"] as string | undefined;
+    const ai = getGeminiClient(customKey);
 
-    const response = await ai.models.generateContent({
+    const response = await generateContentWithFallback(ai, {
       model: "gemini-3.5-flash",
       contents: [
         {
@@ -314,7 +618,7 @@ app.post("/api/gemini/transcribe", async (req, res) => {
         },
         "Transcribe this audio clip exactly. Return only the plain transcribed text. If you hear no words, reply with an empty string.",
       ],
-    });
+    }, customKey);
 
     res.json({ text: response.text });
   } catch (error: any) {
@@ -327,13 +631,14 @@ app.post("/api/gemini/transcribe", async (req, res) => {
 app.post("/api/gemini/analyze", async (req, res) => {
   try {
     const { prompt, base64Image, mimeType, model } = req.body;
-    const ai = getGeminiClient();
+    const customKey = req.headers["x-gemini-api-key"] as string | undefined;
+    const ai = getGeminiClient(customKey);
 
     let selectedModel = model || "gemini-3.5-flash";
 
     let response;
     try {
-      response = await ai.models.generateContent({
+      response = await generateContentWithFallback(ai, {
         model: selectedModel,
         contents: [
           {
@@ -344,12 +649,12 @@ app.post("/api/gemini/analyze", async (req, res) => {
           },
           prompt || "Analyze this image in detail and describe what you see, particularly looking for details, labels, or structures.",
         ],
-      });
+      }, customKey);
     } catch (apiError: any) {
       console.warn("Primary vision model call failed, trying fallback:", apiError);
       if (selectedModel !== "gemini-3.5-flash") {
         selectedModel = "gemini-3.5-flash";
-        response = await ai.models.generateContent({
+        response = await generateContentWithFallback(ai, {
           model: selectedModel,
           contents: [
             {
@@ -360,7 +665,7 @@ app.post("/api/gemini/analyze", async (req, res) => {
             },
             prompt || "Analyze this image in detail and describe what you see, particularly looking for details, labels, or structures.",
           ],
-        });
+        }, customKey);
       } else {
         throw apiError;
       }
@@ -381,8 +686,8 @@ const wss = new WebSocketServer({ noServer: true });
 // Handle WebSocket upgrade for Live API
 server.on("upgrade", (request, socket, head) => {
   try {
-    const url = request.url ? new URL(request.url, "http://localhost") : null;
-    const pathname = url ? url.pathname : "";
+    const urlStr = request.url || "";
+    const pathname = urlStr.split("?")[0];
     if (pathname === "/api/live-ws") {
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit("connection", ws, request);
@@ -399,80 +704,255 @@ server.on("upgrade", (request, socket, head) => {
 wss.on("connection", async (clientWs, request) => {
   console.log("Client established connection to Jarvis Live WebSocket.");
   let session: any = null;
+  let isSetup = false;
 
-  try {
-    const url = new URL(request.url || "", "http://localhost");
-    const language = url.searchParams.get("language") || "English";
-    const voice = url.searchParams.get("voice") || "Zephyr";
-    const customInstruction = url.searchParams.get("systemInstruction") || "";
+  clientWs.on("message", async (data) => {
+    try {
+      const payload = JSON.parse(data.toString());
 
-    let finalInstruction = customInstruction || "You are JARVIS, Tony Stark's personal AI butler. Speak directly, confidently, wittily, and keep responses concise. Always refer to the user as Sir or Boss.";
-    finalInstruction += `\n\nCRITICAL: Please respond and speak in the language: ${language}. If the user speaks in ${language} or English, understand it and reply in ${language}.`;
+      if (payload.type === "setup") {
+        if (isSetup) return;
+        isSetup = true;
 
-    const ai = getGeminiClient();
-    session = await ai.live.connect({
-      model: "gemini-3.1-flash-live-preview",
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: voice === "Charon" ? "Aoede" : voice === "Despina" ? "Kore" : voice } },
-        },
-        systemInstruction: finalInstruction,
-      },
-      callbacks: {
-        onmessage: (message) => {
-          const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-          const text = message.serverContent?.modelTurn?.parts?.[0]?.text;
+        const language = payload.language || "English";
+        const voice = payload.voice || "Zephyr";
+        const customInstruction = payload.systemInstruction || "";
+        const apiKey = payload.apiKey || "";
 
-          if (audio) {
-            clientWs.send(JSON.stringify({ type: "audio", audio }));
+        let finalInstruction = customInstruction || "You are JARVIS, Tony Stark's personal AI butler. Speak directly, confidently, wittily, and keep responses concise. Always refer to the user as Sir or Boss.";
+        finalInstruction += `\n\nCRITICAL: Please respond and speak in the language: ${language}. If the user speaks in ${language} or English, understand it and reply in ${language}.`;
+        finalInstruction += `\n\nIMPORTANT: You have tools/functions available: 'play_video_on_screen', 'open_web', and 'generate_image'. When the user asks you to play a video, watch a video, play music, open a website, browse a site, or generate an image, you MUST call the appropriate tool. Do NOT just say you are doing it; call the tool to actually trigger it on screen!`;
+
+        const liveTools: any = [
+          { googleSearch: {} },
+          {
+            functionDeclarations: [
+              {
+                name: "play_video_on_screen",
+                description: "Plays a YouTube video or music track on the screen matching a search query or song name.",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    query: {
+                      type: "STRING",
+                      description: "The name of the song, artist, video or search query to play on the YouTube player widget, e.g. Heeriye song."
+                    }
+                  },
+                  required: ["query"]
+                }
+              },
+              {
+                name: "open_web",
+                description: "Opens a website or searches Google with the given URL.",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    url: {
+                      type: "STRING",
+                      description: "The exact URL of the website to open, or a google search URL with query parameter."
+                    }
+                  },
+                  required: ["url"]
+                }
+              },
+              {
+                name: "generate_image",
+                description: "Generates or draws an image based on a prompt.",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    prompt: {
+                      type: "STRING",
+                      description: "A detailed description in English of the image to generate."
+                    }
+                  },
+                  required: ["prompt"]
+                }
+              }
+            ]
           }
-          if (text) {
-            clientWs.send(JSON.stringify({ type: "text", text }));
-          }
-          if (message.serverContent?.interrupted) {
-            clientWs.send(JSON.stringify({ type: "interrupted", interrupted: true }));
-          }
-        },
-      },
-    });
+        ];
 
-    clientWs.on("message", (data) => {
-      try {
-        const payload = JSON.parse(data.toString());
-        if (payload.audio) {
+        try {
+          let ai = getGeminiClient(apiKey);
+          try {
+            session = await ai.live.connect({
+              model: "gemini-3.1-flash-live-preview",
+              config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: {
+                  voiceConfig: { prebuiltVoiceConfig: { voiceName: voice === "Charon" ? "Charon" : voice === "Despina" ? "Kore" : voice } },
+                },
+                systemInstruction: finalInstruction,
+                outputAudioTranscription: {},
+                tools: liveTools,
+              },
+              callbacks: {
+                onmessage: (message) => {
+                  let audio = null;
+                  let text = "";
+                  if (message.serverContent?.modelTurn?.parts) {
+                    for (const part of message.serverContent.modelTurn.parts) {
+                      if (part.inlineData?.data) {
+                        audio = part.inlineData.data;
+                      }
+                      if (part.text) {
+                        text += part.text;
+                      }
+                    }
+                  }
+
+                  if (message.toolCall) {
+                    console.log("Jarvis Live API received toolCall:", JSON.stringify(message.toolCall));
+                    // Send toolCall to the client ws so the frontend can execute it in real-time!
+                    clientWs.send(JSON.stringify({ type: "toolCall", toolCall: message.toolCall }));
+
+                    // Immediately respond back to session so the model is satisfied and continues
+                    if (message.toolCall.functionCalls) {
+                      const functionResponses = message.toolCall.functionCalls.map((call: any) => ({
+                        id: call.id,
+                        response: { output: { success: true } }
+                      }));
+                      session.send({
+                        toolResponse: {
+                          functionResponses
+                        }
+                      });
+                    }
+                  }
+
+                  if (audio) {
+                    clientWs.send(JSON.stringify({ type: "audio", audio }));
+                  }
+                  if (text) {
+                    clientWs.send(JSON.stringify({ type: "text", text }));
+                  }
+                  if (message.serverContent?.interrupted) {
+                    clientWs.send(JSON.stringify({ type: "interrupted", interrupted: true }));
+                  }
+                },
+              },
+            });
+          } catch (liveError: any) {
+            const isQuotaError = (err: any) => {
+              const msg = (err?.message || "").toLowerCase();
+              return msg.includes("quota") || msg.includes("exhausted") || msg.includes("429") || msg.includes("limit");
+            };
+            if (isQuotaError(liveError) && process.env.GEMINI_API_KEY_BAC && !apiKey) {
+              console.info("Quota exceeded on primary key for Live API. Retrying with GEMINI_API_KEY_BAC...");
+              ai = getGeminiClient(process.env.GEMINI_API_KEY_BAC);
+              session = await ai.live.connect({
+                model: "gemini-3.1-flash-live-preview",
+                config: {
+                  responseModalities: [Modality.AUDIO],
+                  speechConfig: {
+                    voiceConfig: { prebuiltVoiceConfig: { voiceName: voice === "Charon" ? "Charon" : voice === "Despina" ? "Kore" : voice } },
+                  },
+                  systemInstruction: finalInstruction,
+                  outputAudioTranscription: {},
+                  tools: liveTools,
+                },
+                callbacks: {
+                  onmessage: (message) => {
+                    let audio = null;
+                    let text = "";
+                    if (message.serverContent?.modelTurn?.parts) {
+                      for (const part of message.serverContent.modelTurn.parts) {
+                        if (part.inlineData?.data) {
+                          audio = part.inlineData.data;
+                        }
+                        if (part.text) {
+                          text += part.text;
+                        }
+                      }
+                    }
+
+                    if (message.toolCall) {
+                      console.log("Jarvis Live API Backup received toolCall:", JSON.stringify(message.toolCall));
+                      // Send toolCall to the client ws so the frontend can execute it in real-time!
+                      clientWs.send(JSON.stringify({ type: "toolCall", toolCall: message.toolCall }));
+
+                      // Immediately respond back to session so the model is satisfied and continues
+                      if (message.toolCall.functionCalls) {
+                        const functionResponses = message.toolCall.functionCalls.map((call: any) => ({
+                          id: call.id,
+                          response: { output: { success: true } }
+                        }));
+                        session.send({
+                          toolResponse: {
+                            functionResponses
+                          }
+                        });
+                      }
+                    }
+
+                    if (audio) {
+                      clientWs.send(JSON.stringify({ type: "audio", audio }));
+                    }
+                    if (text) {
+                      clientWs.send(JSON.stringify({ type: "text", text }));
+                    }
+                    if (message.serverContent?.interrupted) {
+                      clientWs.send(JSON.stringify({ type: "interrupted", interrupted: true }));
+                    }
+                  },
+                },
+              });
+            } else {
+              throw liveError;
+            }
+          }
+
+          // Inform client that setup is successful and we're ready
+          clientWs.send(JSON.stringify({ type: "ready" }));
+
+        } catch (error: any) {
+          console.error("Failed to boot Gemini Live session:", error);
+          let errMsg = error.message || "An error occurred during Live session boot.";
+          if (errMsg.toLowerCase().includes("quota") || errMsg.toLowerCase().includes("exhausted") || errMsg.toLowerCase().includes("429") || errMsg.toLowerCase().includes("limit")) {
+            errMsg = `⚠️ সেন্ট্রাল গ্রিড লাইভ স্পিচ কোটা শেষ (LIVE SPEECH QUOTA EXHAUSTED) ⚠️
+
+দুঃখিত স্যার, আমাদের শেয়ারড লাইভ স্পিচ এপিআই কোটা লিমিট শেষ হয়ে গেছে। আপনি সম্পূর্ণ বিনামূল্যে আপনার নিজস্ব API Key তৈরি করে এটি সহজে সমাধান করতে পারেন:
+১. Google AI Studio ওয়েবসাইটে যান: https://aistudio.google.com/ এবং একটি ফ্রি Gemini API Key তৈরি করুন।
+২. এই অ্যাপ্লিকেশনের ডানদিকের উপরে Settings (গিয়ার আইকন ⚙️)-এ ক্লিক করুন।
+৩. Voice Assistant ট্যাবের অধীনে "🔑 GEMINI LIVE API KEY" ইনপুটে আপনার এপিআই কি-টি পেস্ট করুন।
+৪. নিচে স্ক্রল করে "Save System Config" বাটনে ক্লিক করুন।
+
+------------------
+
+Sir, the shared Live speech API quota limit has been exceeded. To resolve this, configure your own free Gemini API key:
+1. Go to Google AI Studio (https://aistudio.google.com/) and create a free API key.
+2. Click the Settings gear icon (⚙️) on the top-right in this app.
+3. Paste your key in the "🔑 GEMINI LIVE API KEY" input under the "Voice Assistant" tab.
+4. Scroll down and click "Save System Config".`;
+          }
+          try {
+            clientWs.send(JSON.stringify({ type: "error", message: errMsg }), () => {
+              clientWs.close();
+            });
+          } catch (sendErr) {
+            console.error("Failed to send WebSocket error message:", sendErr);
+            clientWs.close();
+          }
+        }
+      } else if (payload.audio) {
+        if (session) {
           session.sendRealtimeInput({
             audio: { data: payload.audio, mimeType: "audio/pcm;rate=16000" },
           });
         }
-      } catch (err) {
-        console.error("Error handling incoming live WS audio packet:", err);
       }
-    });
-
-    clientWs.on("close", () => {
-      console.log("Jarvis Live WebSocket connection closed.");
-      if (session) {
-        session.close();
-      }
-    });
-
-  } catch (error: any) {
-    console.error("Failed to boot Gemini Live session:", error);
-    let errMsg = error.message || "An error occurred during Live session boot.";
-    if (errMsg.toLowerCase().includes("quota") || errMsg.toLowerCase().includes("exhausted") || errMsg.toLowerCase().includes("429") || errMsg.toLowerCase().includes("limit")) {
-      errMsg = "Sir, we have exceeded the central grid's Gemini API quota limit (429 RESOURCE_EXHAUSTED) for speech connection. Please configure your own API key under Settings > Secrets, or please try again later once the reset window passes.";
+    } catch (err) {
+      console.error("Error handling incoming live WS packet:", err);
     }
-    // Send error message to client before closing the socket to avoid unhandled WebSocket crashes
-    try {
-      clientWs.send(JSON.stringify({ type: "error", message: errMsg }), () => {
-        clientWs.close();
-      });
-    } catch (sendErr) {
-      console.error("Failed to send WebSocket error message:", sendErr);
-      clientWs.close();
+  });
+
+  clientWs.on("close", () => {
+    console.log("Jarvis Live WebSocket connection closed.");
+    if (session) {
+      session.close();
     }
-  }
+  });
 });
 
 // Vite Middleware & SPA Static fallback routing

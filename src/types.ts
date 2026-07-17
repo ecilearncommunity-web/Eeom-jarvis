@@ -10,6 +10,9 @@ export interface Message {
     mimeType: string;
   };
   groundingChunks?: any[];
+  activeVideoId?: string;
+  youtubeResults?: any[];
+  playQuery?: string;
 }
 
 export interface Note {
@@ -102,5 +105,6 @@ export interface SystemSettings {
   personalityTemplate: string;
   personalityPrompt: string;
   memories?: Array<{ id: string; content: string; createdAt: string }>;
+  customTemplates?: Record<string, string>;
 }
 

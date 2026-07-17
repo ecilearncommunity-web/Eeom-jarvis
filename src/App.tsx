@@ -12,6 +12,8 @@ import {
   collection, 
   addDoc, 
   getDocs, 
+  getDoc,
+  setDoc,
   query, 
   where, 
   deleteDoc, 
@@ -71,10 +73,15 @@ import {
   MessageCircle,
   Cpu,
   Monitor,
+  AlertCircle,
   User as UserIcon,
-  Video
+  Video,
+  Music,
+  SkipForward,
+  SkipBack
 } from "lucide-react";
 import { PCMPlayer, floatTo16BitPCM, arrayBufferToBase64 } from "./lib/audioHelper";
+import { MediaController } from "./components/MediaController";
 
 export default function App() {
   // Authentication & Core State
@@ -112,7 +119,7 @@ export default function App() {
   const [ttsEnabled, setTtsEnabled] = useState(true);
   const [voiceSelected, setVoiceSelected] = useState<"Zephyr" | "Kore" | "Puck" | "Charon" | "Fenrir">("Zephyr");
   const [thinkingMode, setThinkingMode] = useState(false);
-  const [groundingMode, setGroundingMode] = useState<"none" | "search" | "maps">("none");
+  const [groundingMode, setGroundingMode] = useState<"none" | "search" | "maps">("search");
   const [preferredModel, setPreferredModel] = useState<string>("gemini-3.5-flash");
 
   // Chat Subsystem State
@@ -126,6 +133,7 @@ export default function App() {
   const [liveVoiceActive, setLiveVoiceActive] = useState(false);
   const [liveWsStatus, setLiveWsStatus] = useState<"disconnected" | "connecting" | "connected">("disconnected");
   const [liveTextTranscript, setLiveTextTranscript] = useState<string[]>([]);
+  const [liveSessionError, setLiveSessionError] = useState<string | null>(null);
   
   // Workspace Integration States
   const [workspaceTab, setWorkspaceTab] = useState<"gmail" | "calendar" | "tasks" | "meet" | "chat">("gmail");
@@ -174,6 +182,9 @@ export default function App() {
   const [sandboxActiveTab, setSandboxActiveTab] = useState<"browser" | "media" | "code" | "image">("browser");
   const [sandboxBrowserUrl, setSandboxBrowserUrl] = useState("https://www.google.com/search?igu=1");
   const [sandboxYoutubeQuery, setSandboxYoutubeQuery] = useState("");
+  const [sandboxActiveVideoId, setSandboxActiveVideoId] = useState("");
+  const [sandboxYoutubeResults, setSandboxYoutubeResults] = useState<any[]>([]);
+  const [sandboxYoutubeLoading, setSandboxYoutubeLoading] = useState(false);
   const [sandboxCode, setSandboxCode] = useState(`console.log("Jarvis CyberDeck Online. System is fully operational.");`);
   const [sandboxCodeTitle, setSandboxCodeTitle] = useState("SandboxScript");
   const [sandboxTerminalLogs, setSandboxTerminalLogs] = useState<string[]>([
@@ -202,39 +213,137 @@ export default function App() {
     whatsAppLinkStatus: "disconnected",
     personalityTemplate: "Bangla Bandhu",
     personalityPrompt: "তুমি একজন বাঙালি বন্ধু (Bangla Bandhu) – অতি আন্তরিক, সাহায্যকারী এবং বন্ধুবৎসল। তোমার কণ্ঠ মিষ্টি ও সাবলীল। ব্যবহারকারীকে যেকোনো কাজে বাংলায় সাহায্য করবে, আড্ডা দেবে এবং বুদ্ধিমান পরামর্শ দেবে। সর্বদা হাসি-খুশি ও রসিক মন-মানসিকতা বজায় রাখবে।",
-    memories: []
+    memories: [],
+    customTemplates: {}
   };
 
-  const [systemSettings, setSystemSettings] = useState<SystemSettings>(DEFAULT_SETTINGS);
+  const [systemSettings, setSystemSettings] = useState<SystemSettings>(() => {
+    if (typeof window !== "undefined") {
+      const savedUser = localStorage.getItem("jarvis_user");
+      if (savedUser) {
+        try {
+          const u = JSON.parse(savedUser);
+          const local = localStorage.getItem(`settings_${u.uid}`);
+          if (local) {
+            return { ...DEFAULT_SETTINGS, ...JSON.parse(local) };
+          }
+        } catch (e) {
+          console.error("Failed to load initial settings:", e);
+        }
+      }
+    }
+    return DEFAULT_SETTINGS;
+  });
+
+  const getAssistantName = () => {
+    const template = systemSettings.personalityTemplate || "Jarvis";
+    if (template.includes("Ruhi")) {
+      return "Ruhi";
+    }
+    if (template.includes("Bangla Bandhu") || template.includes("বাঙালি বন্ধু")) {
+      return "বাঙালি বন্ধু";
+    }
+    if (template.includes("Customer Care")) {
+      return "Customer Care Agent";
+    }
+    if (template.includes("Caring Companion")) {
+      return "Caring Companion";
+    }
+    if (template.includes("Jarvis") || template.includes("Loyal Butler")) {
+      return "Jarvis";
+    }
+    if (systemSettings.personalityTemplate && systemSettings.personalityTemplate !== "Custom") {
+      // Stripping brackets or formatting if needed
+      return systemSettings.personalityTemplate.replace(/\s*\(.*?\)\s*/, "");
+    }
+    return "Jarvis";
+  };
+  const assistantName = getAssistantName();
+
   const [showSystemConfig, setShowSystemConfig] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   const fetchSystemSettings = async (userId: string) => {
+    // Check if client is offline or navigator indicates offline status
+    const isOffline = typeof navigator !== "undefined" && !navigator.onLine;
+
+    if (isOffline) {
+      const local = localStorage.getItem(`settings_${userId}`);
+      if (local) {
+        try {
+          const parsed = JSON.parse(local);
+          const merged = { ...DEFAULT_SETTINGS, ...parsed };
+          setSystemSettings(merged);
+          if (parsed.voicePersona === "Charon") {
+            setVoiceSelected("Charon");
+          } else {
+            setVoiceSelected("Kore");
+          }
+          return;
+        } catch (e) {}
+      }
+      setShowOnboarding(true);
+      return;
+    }
+
     try {
-      const q = query(collection(db, `users/${userId}/config`));
-      const snap = await getDocs(q);
-      if (!snap.empty) {
-        const data = snap.docs[0].data() as SystemSettings;
-        setSystemSettings(data);
+      const docRef = doc(db, "users", userId, "config", "settings");
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        const data = snap.data() as SystemSettings;
+        const merged = { ...DEFAULT_SETTINGS, ...data };
+        setSystemSettings(merged);
+        localStorage.setItem(`settings_${userId}`, JSON.stringify(merged));
         if (data.voicePersona === "Charon") {
           setVoiceSelected("Charon");
         } else {
           setVoiceSelected("Kore");
         }
       } else {
+        // Firestore is empty. Check if we have local settings to back-sync
+        const local = localStorage.getItem(`settings_${userId}`);
+        if (local) {
+          try {
+            const parsed = JSON.parse(local);
+            const merged = { ...DEFAULT_SETTINGS, ...parsed };
+            setSystemSettings(merged);
+            await setDoc(docRef, merged);
+            return;
+          } catch (e) {
+            console.warn("Local sync failed:", e);
+          }
+        }
         setShowOnboarding(true);
       }
-    } catch (err) {
-      console.error("Failed to fetch settings from Firestore:", err);
+    } catch (err: any) {
+      // Gracefully handle offline or network unreachable errors as warnings rather than console errors
+      const isOfflineError = 
+        !navigator.onLine || 
+        (err && err.message && (
+          err.message.toLowerCase().includes("offline") || 
+          err.message.toLowerCase().includes("unreachable") ||
+          err.message.toLowerCase().includes("network")
+        )) ||
+        (err && err.code === "unavailable");
+
+      if (isOfflineError) {
+        console.warn("Firestore settings fetch bypassed (offline/network unreachable). Using local fallback.");
+      } else {
+        console.error("Failed to fetch settings from Firestore:", err);
+      }
+
       const local = localStorage.getItem(`settings_${userId}`);
       if (local) {
-        const parsed = JSON.parse(local);
-        setSystemSettings(parsed);
-        if (parsed.voicePersona === "Charon") {
-          setVoiceSelected("Charon");
-        } else {
-          setVoiceSelected("Kore");
-        }
+        try {
+          const parsed = JSON.parse(local);
+          const merged = { ...DEFAULT_SETTINGS, ...parsed };
+          setSystemSettings(merged);
+          if (parsed.voicePersona === "Charon") {
+            setVoiceSelected("Charon");
+          } else {
+            setVoiceSelected("Kore");
+          }
+        } catch (e) {}
       } else {
         setShowOnboarding(true);
       }
@@ -243,32 +352,30 @@ export default function App() {
 
   const saveSystemSettings = async (newSettings: SystemSettings) => {
     if (!user) return;
+    const merged = { ...DEFAULT_SETTINGS, ...newSettings };
+
+    // 1. Immediately update local state and local storage for instant responsiveness
+    setSystemSettings(merged);
+    localStorage.setItem(`settings_${user.uid}`, JSON.stringify(merged));
+    if (merged.voicePersona === "Charon") {
+      setVoiceSelected("Charon");
+    } else {
+      setVoiceSelected("Kore");
+    }
+    setTerminalOutput(prev => [...prev, `[SYSTEM] Configuration updated. Language set to ${merged.language}.`]);
+
+    // 2. Perform background synchronization to Firestore without blocking the UI
     try {
-      const collRef = collection(db, `users/${user.uid}/config`);
-      const snap = await getDocs(collRef);
-      if (!snap.empty) {
-        const docRef = doc(db, `users/${user.uid}/config`, snap.docs[0].id);
-        await updateDoc(docRef, newSettings as any);
-      } else {
-        await addDoc(collRef, newSettings);
-      }
-      setSystemSettings(newSettings);
-      localStorage.setItem(`settings_${user.uid}`, JSON.stringify(newSettings));
-      if (newSettings.voicePersona === "Charon") {
-        setVoiceSelected("Charon");
-      } else {
-        setVoiceSelected("Kore");
-      }
-      setTerminalOutput(prev => [...prev, `[SYSTEM] Configuration updated. Language set to ${newSettings.language}.`]);
+      const docRef = doc(db, "users", user.uid, "config", "settings");
+      setDoc(docRef, merged)
+        .then(() => {
+          console.log("Settings successfully synced to cloud.");
+        })
+        .catch((err) => {
+          console.warn("Firestore background settings sync deferred/offline:", err);
+        });
     } catch (err) {
-      console.error("Failed to save settings:", err);
-      setSystemSettings(newSettings);
-      localStorage.setItem(`settings_${user.uid}`, JSON.stringify(newSettings));
-      if (newSettings.voicePersona === "Charon") {
-        setVoiceSelected("Charon");
-      } else {
-        setVoiceSelected("Kore");
-      }
+      console.warn("Firestore settings reference failed:", err);
     }
   };
 
@@ -319,7 +426,7 @@ When writing executable automation scripts or code, output:
 <action type="run_code" title="ScriptName" code="complete code payload" />
 (e.g., "আমার জন্য একটি পাইথন স্ক্রিপ্ট রান করো যা হ্যালো বলবে" -> \`আমি একটি পাইথন স্ক্রিপ্ট তৈরি করে স্যান্ডবক্সে রান করছি। <action type="run_code" title="HelloWorld" code="print('Hello from Jarvis Sandbox Core')" />\`)
 
-Make sure to explain what you are doing in friendly Bengali (since you are Bangla Bandhu) or English based on the user's setup, and place the action tag right inside your text reply!`;
+Make sure to explain what you are doing matching your selected personality template and tone (${settings.personalityTemplate || "Jarvis"}) and preferred language (${settings.language}), and place the action tag right inside your text reply!`;
 
     // Add direct behavior instruction for remembering user identities and details
     instruction += `\n\nCRITICAL DIRECTIVE:\n- The user's Gmail/Google account is logged in, and this is their private assistant.\n- If they ask "who am I?" or "কে আমি?", "আমার নাম কি?", "আমার বিজনেস কি?", respond warmly in their preferred language (${settings.language}), greeting them by their name (${settings.userName || "Boss"}), and summarize what you know about them from their Profile and Memory Vault.\n- If any details are missing, warmly suggest they can add more facts to their "Memory Vault" (মেমোরি ভল্ট) in the System Settings (click the settings gear icon next to their email in the sidebar).`;
@@ -344,7 +451,16 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
   const liveAudioCtxRef = useRef<AudioContext | null>(null);
   const liveProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const livePlayerRef = useRef<PCMPlayer | null>(null);
+  const ttsPlayerRef = useRef<PCMPlayer | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
+  const mediaPlaceholderRef = useRef<HTMLDivElement | null>(null);
+  const liveAssistantTextBufferRef = useRef<string>("");
+  const lastChunkTimeRef = useRef<number>(0);
+  const systemSettingsRef = useRef(systemSettings);
+
+  useEffect(() => {
+    systemSettingsRef.current = systemSettings;
+  }, [systemSettings]);
 
   // Time & Location
   const [currentTime, setCurrentTime] = useState<string>("");
@@ -365,7 +481,10 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
         
         const res = await fetch("/api/gemini/image", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { 
+            "Content-Type": "application/json",
+            "x-gemini-api-key": systemSettingsRef.current.geminiLiveApiKey || ""
+          },
           body: JSON.stringify({
             prompt: prompt,
             model: "gemini-3.1-flash-image",
@@ -413,11 +532,9 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
         const query = attrs.query;
         if (!query) throw new Error("Missing 'query' attribute.");
         
-        setSandboxYoutubeQuery(query);
         setSandboxActiveTab("media");
         setShowCyberDeck(true);
-        
-        setTerminalOutput(prev => [...prev, `[CYBERDECK] Audio frequency routed to YouTube Stream: ${query}`]);
+        triggerYoutubeSearch(query);
         
         setProcessingActions(prev => ({
           ...prev,
@@ -789,7 +906,7 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
   const fetchPersistentNotes = async (userId: string) => {
     setLoadingNotes(true);
     try {
-      const q = query(collection(db, "notes"), where("userId", "==", userId), orderBy("updatedAt", "desc"));
+      const q = query(collection(db, "notes"), where("userId", "==", userId));
       const snapshot = await getDocs(q);
       const items: Note[] = [];
       snapshot.forEach((d) => {
@@ -803,6 +920,12 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
           updatedAt: data.updatedAt
         });
       });
+      // Sort in memory to avoid requiring a composite index in Firestore
+      items.sort((a, b) => {
+        const timeA = a.updatedAt?.toMillis ? a.updatedAt.toMillis() : (a.updatedAt?.seconds ? a.updatedAt.seconds * 1000 : 0);
+        const timeB = b.updatedAt?.toMillis ? b.updatedAt.toMillis() : (b.updatedAt?.seconds ? b.updatedAt.seconds * 1000 : 0);
+        return timeB - timeA;
+      });
       setNotes(items);
     } catch (err) {
       console.error("Firestore loading notes failed:", err);
@@ -814,7 +937,7 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
   const fetchPersistentScripts = async (userId: string) => {
     setLoadingScripts(true);
     try {
-      const q = query(collection(db, "scripts"), where("userId", "==", userId), orderBy("createdAt", "desc"));
+      const q = query(collection(db, "scripts"), where("userId", "==", userId));
       const snapshot = await getDocs(q);
       const items: AutomationScript[] = [];
       snapshot.forEach((d) => {
@@ -827,6 +950,12 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
           code: data.code || "",
           createdAt: data.createdAt
         });
+      });
+      // Sort in memory to avoid requiring a composite index in Firestore
+      items.sort((a, b) => {
+        const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt?.seconds ? a.createdAt.seconds * 1000 : 0);
+        const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt?.seconds ? b.createdAt.seconds * 1000 : 0);
+        return timeB - timeA;
       });
       setScripts(items);
     } catch (err) {
@@ -916,6 +1045,25 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
     const text = textToSend || inputMessage;
     if (!text.trim() && !customImage) return;
 
+    // Interrupt any active TTS output as the user is dispatching a new instruction
+    if (ttsPlayerRef.current) {
+      try {
+        ttsPlayerRef.current.stop();
+      } catch (e) {
+        console.warn("Failed to stop current speech playback:", e);
+      }
+      ttsPlayerRef.current = null;
+    }
+
+    // Gentle terminal status update if API key or name is missing, but non-blocking
+    const isProfileUnset = !systemSettings.geminiLiveApiKey || !systemSettings.userName;
+    if (isProfileUnset) {
+      setTerminalOutput(prev => [
+        ...prev,
+        "[STATUS] Operational using environment uplink. (Note: Complete your Profile in Settings to personalize Jarvis's memory & voice.)"
+      ]);
+    }
+
     const userMsg: Message = {
       id: Math.random().toString(36).substring(7),
       role: "user",
@@ -945,7 +1093,10 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
       // Call Express proxy endpoint
       const res = await fetch("/api/gemini/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "x-gemini-api-key": systemSettings.geminiLiveApiKey || ""
+        },
         body: JSON.stringify({
           messages: history,
           model: thinkingMode ? "gemini-3.1-pro-preview" : preferredModel,
@@ -962,10 +1113,42 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
         throw new Error(data.error);
       }
 
+      let replyText = data.text || "";
+      let hasPlayCall = false;
+      let playQuery = "";
+
+      if (data.functionCalls && data.functionCalls.length > 0) {
+        for (const call of data.functionCalls) {
+          if (call.name === "play_video_on_screen") {
+            const query = call.args?.query;
+            if (query) {
+              hasPlayCall = true;
+              playQuery = query;
+              setSandboxActiveTab("media");
+              setShowCyberDeck(true);
+              triggerYoutubeSearch(query);
+              setTerminalOutput(prev => [
+                ...prev, 
+                `[FUNCTION CALL] play_video_on_screen triggered with query: "${query}"`
+              ]);
+            }
+          }
+        }
+      }
+
+      if (hasPlayCall) {
+        if (!replyText.trim()) {
+          replyText = `Sure Boss, playing video for "${playQuery}" on your screen right now.`;
+        }
+        if (!replyText.includes('<action type="play_youtube"')) {
+          replyText += `\n\n<action type="play_youtube" query="${playQuery}" />`;
+        }
+      }
+
       const jarvisReply: Message = {
         id: Math.random().toString(36).substring(7),
         role: "assistant",
-        content: data.text,
+        content: replyText,
         timestamp: new Date(),
         modelUsed: thinkingMode ? "gemini-3.1-pro-preview (Thinking)" : preferredModel,
         groundingChunks: data.groundingChunks
@@ -983,7 +1166,7 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
           },
           body: JSON.stringify({
             prompt: text,
-            response: data.text,
+            response: replyText,
             mode: "text"
           })
         }).then(async (dbRes) => {
@@ -994,14 +1177,14 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
       }
 
       // Automatically Speak out answer if TTS is enabled
-      if (ttsEnabled) {
-        speakResponse(data.text);
+      if (ttsEnabled && replyText.trim()) {
+        speakResponse(replyText);
       }
 
       // Check if code block is detected, extract and offer to Terminal
       const codeRegex = /```(?:python|bash|cmd|sh|javascript)?\n([\s\S]*?)```/g;
       let match;
-      while ((match = codeRegex.exec(data.text)) !== null) {
+      while ((match = codeRegex.exec(replyText)) !== null) {
         const code = match[1];
         setTerminalOutput(prev => [
           ...prev, 
@@ -1012,10 +1195,46 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
 
     } catch (err: any) {
       console.error("Jarvis Chat error:", err);
+      const isQuota = (err.message || "").toLowerCase().includes("quota") || 
+                      (err.message || "").toLowerCase().includes("exhausted") || 
+                      (err.message || "").toLowerCase().includes("429") || 
+                      (err.message || "").toLowerCase().includes("limit");
+      
+      let friendlyError = `Sir, I encountered a connection anomaly in the central grid. Core error: ${err.message}`;
+      
+      if (isQuota) {
+        if (systemSettings.language === "Bengali") {
+          friendlyError = `⚠️ **সেন্ট্রাল গ্রিড এপিআই কোটা বা লিমিট শেষ হয়ে গেছে (API QUOTA EXHAUSTED)**
+
+দুঃখিত স্যার, শেয়ারড বা ফ্রি এপিআই কোটা লিমিট শেষ হয়ে গেছে। আপনি সহজেই সম্পূর্ণ বিনামূল্যে আপনার নিজস্ব API Key তৈরি করে এটি আজীবনের জন্য সমাধান করতে পারেন!
+
+**কিভাবে আপনার নিজস্ব API Key যোগ করবেন:**
+১. **Google AI Studio** ওয়েবসাইটে যান: https://aistudio.google.com/
+২. সেখানে সম্পূর্ণ বিনামূল্যে একটি **Gemini API Key** তৈরি করুন।
+৩. এই অ্যাপ্লিকেশনের ডানদিকের উপরে **Settings (গিয়ার আইকন ⚙️)**-এ ক্লিক করুন।
+৪. **Voice Assistant** ট্যাবের অধীনে **🔑 GEMINI LIVE API KEY** ইনপুটে আপনার এপিআই কি-টি পেস্ট করুন।
+৫. নিচে স্ক্রল করে **Save System Config** বাটনে ক্লিক করুন। 
+
+এটি সম্পন্ন করলেই আমি আবার সক্রিয় হয়ে আপনার সমস্ত প্রশ্নের উত্তর দিতে পারবো, স্যার!`;
+        } else {
+          friendlyError = `⚠️ **CENTRAL GRID API QUOTA EXHAUSTED (429)**
+
+I apologize, Sir, but our shared free API quota limit has been exceeded. You can easily resolve this by adding your own free Gemini API key:
+
+**Steps to configure your personal API Key:**
+1. Go to **Google AI Studio**: https://aistudio.google.com/ and create a free API key.
+2. Click the **Settings (gear icon ⚙️)** on the top right next to your profile picture in this app.
+3. Paste your key into the **🔑 GEMINI LIVE API KEY** input under the **Voice Assistant** tab.
+4. Click **Save System Config** at the bottom of the modal.
+
+Once configured, I will be immediately ready to assist you again, Sir!`;
+        }
+      }
+
       setChatMessages(prev => [...prev, {
         id: Math.random().toString(36).substring(7),
         role: "assistant",
-        content: `Sir, I encountered a connection anomaly in the central grid. Core error: ${err.message}`,
+        content: friendlyError,
         timestamp: new Date()
       }]);
     } finally {
@@ -1025,6 +1244,16 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
 
   // 5. Speech-to-Text Recording and Transcription
   const startRecording = async () => {
+    // Interrupt any active TTS output as the user is starting voice recording
+    if (ttsPlayerRef.current) {
+      try {
+        ttsPlayerRef.current.stop();
+      } catch (e) {
+        console.warn("Failed to stop current speech playback:", e);
+      }
+      ttsPlayerRef.current = null;
+    }
+
     audioChunksRef.current = [];
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -1072,7 +1301,10 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
     try {
       const res = await fetch("/api/gemini/transcribe", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "x-gemini-api-key": systemSettings.geminiLiveApiKey || ""
+        },
         body: JSON.stringify({ base64Audio, mimeType: "audio/wav" })
       });
       const data = await res.json();
@@ -1086,20 +1318,68 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
     }
   };
 
+  // YouTube Dynamic Stream Searching
+  const triggerYoutubeSearch = async (query: string) => {
+    if (!query.trim()) return;
+    setSandboxYoutubeLoading(true);
+    setSandboxYoutubeQuery(query);
+    try {
+      const res = await fetch(`/api/youtube/search?q=${encodeURIComponent(query)}`);
+      const data = await res.json();
+      if (data.videos && data.videos.length > 0) {
+        setSandboxYoutubeResults(data.videos);
+        // Automatically play the very first result!
+        setSandboxActiveVideoId(data.videos[0].videoId);
+        setTerminalOutput(prev => [
+          ...prev, 
+          `[CYBERDECK] Media Deck: Connected to stream line. Playing first track: "${data.videos[0].title}"`
+        ]);
+      } else {
+        setSandboxYoutubeResults([]);
+        setSandboxActiveVideoId("");
+        setTerminalOutput(prev => [
+          ...prev, 
+          `[CYBERDECK] Media Deck search returned empty results for: "${query}"`
+        ]);
+      }
+    } catch (err: any) {
+      console.error("Failed to query YouTube api:", err);
+      setTerminalOutput(prev => [...prev, `[CYBERDECK ERROR] Media deck stream failed: ${err.message}`]);
+    } finally {
+      setSandboxYoutubeLoading(false);
+    }
+  };
+
   // 6. Text-to-Speech (Speaking back responses)
   const speakResponse = async (text: string) => {
-    // Strip markdown tags and code blocks from text to make TTS clear
+    // Stop any existing TTS playback to prevent overlapping voice tracks
+    if (ttsPlayerRef.current) {
+      try {
+        ttsPlayerRef.current.stop();
+      } catch (e) {
+        console.warn("Failed to stop previous TTS:", e);
+      }
+      ttsPlayerRef.current = null;
+    }
+
+    // Strip action tags, markdown blocks, HTML/XML elements, and brackets from text to make TTS clear
     const cleanText = text
+      .replace(/<action\s+type="[^"]+"\s+[^>]+\/?>/g, "") // remove self-closing action tags
+      .replace(/<action[\s\S]*?<\/action>/g, "") // remove block-level action tags
+      .replace(/<[^>]+>/g, "") // remove any residual HTML/XML tags
       .replace(/```[\s\S]*?```/g, "") // remove code blocks
-      .replace(/[*#_~`-]/g, "") // remove simple styling
-      .substring(0, 400); // limit to protect rate limits
+      .replace(/[*#_~`-]/g, "") // remove simple styling tags
+      .substring(0, 400); // limit payload length to protect rate limits
 
     if (!cleanText.trim()) return;
 
     try {
       const res = await fetch("/api/gemini/tts", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "x-gemini-api-key": systemSettings.geminiLiveApiKey || ""
+        },
         body: JSON.stringify({ 
           text: cleanText, 
           voiceName: voiceSelected,
@@ -1108,8 +1388,9 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
       });
       const data = await res.json();
       if (data.audio) {
-        // Play back PCM
+        // Play back PCM and track reference for dynamic cancellation
         const player = new PCMPlayer(24000);
+        ttsPlayerRef.current = player;
         player.playChunk(data.audio);
       }
     } catch (err) {
@@ -1120,105 +1401,204 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
   // 7. Live Voice Conversation Bridge (WebSocket stream)
   const startLiveVoiceSession = async () => {
     if (liveVoiceActive) return;
+    setLiveSessionError(null);
+    liveAssistantTextBufferRef.current = ""; // Reset buffer at session start
     setLiveTextTranscript(["Initializing real-time audio bridge...", "Status: Dialing central server..."]);
     setLiveWsStatus("connecting");
 
     try {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const langParam = encodeURIComponent(systemSettings.language);
-      const voiceParam = encodeURIComponent(systemSettings.voicePersona);
-      const sysParam = encodeURIComponent(getCompiledSystemInstruction(systemSettings));
-      const ws = new WebSocket(`${protocol}//${window.location.host}/api/live-ws?language=${langParam}&voice=${voiceParam}&systemInstruction=${sysParam}`);
+      const ws = new WebSocket(`${protocol}//${window.location.host}/api/live-ws`);
       liveWsRef.current = ws;
 
       // Output player (24kHz for Live API)
       const player = new PCMPlayer(24000);
       livePlayerRef.current = player;
 
-      ws.onopen = async () => {
-        setLiveWsStatus("connected");
-        setLiveVoiceActive(true);
-        setLiveTextTranscript(prev => [...prev, "Status: Core Uplink Established. Ready to speak, Boss."]);
-
-        // Start capturing mic at 16kHz PCM
-        try {
-          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-          liveAudioCtxRef.current = audioCtx;
-
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          const source = audioCtx.createMediaStreamSource(stream);
-          
-          // Script processor to gather audio chunks
-          const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-          liveProcessorRef.current = processor;
-          source.connect(processor);
-          processor.connect(audioCtx.destination);
-
-          processor.onaudioprocess = (e) => {
-            if (ws.readyState !== WebSocket.OPEN) return;
-            const inputData = e.inputBuffer.getChannelData(0);
-            const pcmBuffer = floatTo16BitPCM(inputData);
-            const base64Audio = arrayBufferToBase64(pcmBuffer);
-            ws.send(JSON.stringify({ audio: base64Audio }));
-          };
-        } catch (err) {
-          console.error("Mic stream setup failure for Live session:", err);
-          setLiveTextTranscript(prev => [...prev, "Hardware error: Microphone capture failed."]);
-        }
+      ws.onopen = () => {
+        // Send setup parameters immediately over the WebSocket connection
+        ws.send(JSON.stringify({
+          type: "setup",
+          language: systemSettings.language,
+          voice: systemSettings.voicePersona,
+          systemInstruction: getCompiledSystemInstruction(systemSettings),
+          apiKey: systemSettings.geminiLiveApiKey || ""
+        }));
       };
 
-      ws.onmessage = (event) => {
+      ws.onmessage = async (event) => {
         const payload = JSON.parse(event.data);
+        if (payload.type === "ready") {
+          setLiveWsStatus("connected");
+          setLiveVoiceActive(true);
+          setLiveTextTranscript(prev => [...prev, "Status: Core Uplink Established. Ready to speak, Boss."]);
+
+          // Start capturing mic at 16kHz PCM
+          try {
+            const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+            liveAudioCtxRef.current = audioCtx;
+
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const source = audioCtx.createMediaStreamSource(stream);
+            
+            // Script processor to gather audio chunks
+            const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+            liveProcessorRef.current = processor;
+            source.connect(processor);
+            processor.connect(audioCtx.destination);
+
+            processor.onaudioprocess = (e) => {
+              if (ws.readyState !== WebSocket.OPEN) return;
+              const inputData = e.inputBuffer.getChannelData(0);
+              const pcmBuffer = floatTo16BitPCM(inputData);
+              const base64Audio = arrayBufferToBase64(pcmBuffer);
+              ws.send(JSON.stringify({ audio: base64Audio }));
+            };
+          } catch (err) {
+            console.error("Mic stream setup failure for Live session:", err);
+            setLiveTextTranscript(prev => [...prev, "Hardware error: Microphone capture failed."]);
+          }
+        }
         if (payload.type === "audio" && payload.audio) {
           player.playChunk(payload.audio);
         }
+        if (payload.type === "toolCall" && payload.toolCall?.functionCalls) {
+          for (const call of payload.toolCall.functionCalls) {
+            const actionId = `voice-tool-${Date.now()}-${Math.random().toString(36).substring(4)}`;
+            let type = "";
+            const attrs: Record<string, string> = {};
+
+            if (call.name === "play_video_on_screen" || call.name === "play_youtube") {
+              type = "play_youtube";
+              attrs.query = call.args?.query || call.args?.search_query || "";
+            } else if (call.name === "open_web") {
+              type = "open_web";
+              attrs.url = call.args?.url || "";
+            } else if (call.name === "generate_image") {
+              type = "generate_image";
+              attrs.prompt = call.args?.prompt || "";
+            } else if (call.name === "run_code") {
+              type = "run_code";
+              attrs.title = call.args?.title || "";
+              attrs.code = call.args?.code || "";
+            }
+
+            if (type) {
+              console.log("Executing Live API Tool Call:", type, attrs);
+              executeSandboxAction(actionId, type, attrs);
+            }
+          }
+        }
         if (payload.type === "text" && payload.text) {
-          setLiveTextTranscript(prev => [...prev, `Jarvis: ${payload.text}`]);
+          const now = Date.now();
+          // Reset buffer if there has been more than 4000ms of silence (new utterance)
+          if (now - lastChunkTimeRef.current > 4000) {
+            liveAssistantTextBufferRef.current = "";
+          }
+          lastChunkTimeRef.current = now;
+
+          // Append chunk to the buffer
+          liveAssistantTextBufferRef.current += payload.text;
+
+          // Stream text to the UI by updating the last "Jarvis: " transcript line
+          setLiveTextTranscript(prev => {
+            const copy = [...prev];
+            const lastIdx = copy.length - 1;
+            if (lastIdx >= 0 && copy[lastIdx].startsWith("Jarvis: ")) {
+              copy[lastIdx] = `Jarvis: ${liveAssistantTextBufferRef.current}`;
+            } else {
+              copy.push(`Jarvis: ${liveAssistantTextBufferRef.current}`);
+            }
+            return copy;
+          });
+
+          // Check for complete action tags inside the accumulated buffer
+          const actionRegex = /<action\s+type="([^"]+)"\s+([^>]+)\/?>/g;
+          let match;
+          while ((match = actionRegex.exec(liveAssistantTextBufferRef.current)) !== null) {
+            const matchedTag = match[0];
+            const type = match[1];
+            const attrsRaw = match[2];
+            const actionId = `voice-${Date.now()}-${Math.random().toString(36).substring(4)}`;
+
+            // Extract attributes manually
+            const attrs: Record<string, string> = {};
+            const attrRegex = /(\w+)="([^"]+)"/g;
+            let attrMatch;
+            while ((attrMatch = attrRegex.exec(attrsRaw)) !== null) {
+              attrs[attrMatch[1]] = attrMatch[2];
+            }
+
+            console.log("Extracted Voice Action from buffer:", type, attrs);
+            executeSandboxAction(actionId, type, attrs);
+
+            // Strip the executed tag from the buffer to prevent double triggers
+            liveAssistantTextBufferRef.current = liveAssistantTextBufferRef.current.replace(matchedTag, "");
+
+            // Refresh UI text to strip action tag from displaying to user
+            setLiveTextTranscript(prev => {
+              const copy = [...prev];
+              const lastIdx = copy.length - 1;
+              if (lastIdx >= 0 && copy[lastIdx].startsWith("Jarvis: ")) {
+                copy[lastIdx] = `Jarvis: ${liveAssistantTextBufferRef.current.trim()}`;
+              }
+              return copy;
+            });
+          }
         }
         if (payload.type === "interrupted") {
           player.stop();
+          liveAssistantTextBufferRef.current = "";
           setLiveTextTranscript(prev => [...prev, "[ALERT]: Transcription Interrupted."]);
         }
         if (payload.type === "error") {
           setLiveTextTranscript(prev => [...prev, `[ERROR]: ${payload.message}`]);
+          setLiveSessionError(payload.message);
         }
       };
 
       ws.onclose = () => {
-        stopLiveVoiceSession();
+        cleanupAudioResources();
+        setLiveVoiceActive(false);
+        setLiveWsStatus("disconnected");
       };
 
       ws.onerror = (err) => {
         console.error("Live Web socket error:", err);
-        stopLiveVoiceSession();
+        setLiveSessionError(prev => prev || "Failed to establish real-time socket link with local server.");
       };
 
-    } catch (err) {
+    } catch (err: any) {
       console.error("Live Web socket setup failed:", err);
       setLiveWsStatus("disconnected");
+      setLiveSessionError(err?.message || "Failed to establish real-time socket link with local server.");
+    }
+  };
+
+  const cleanupAudioResources = () => {
+    if (liveWsRef.current) {
+      try { liveWsRef.current.close(); } catch(e){}
+      liveWsRef.current = null;
+    }
+    if (liveProcessorRef.current) {
+      try { liveProcessorRef.current.disconnect(); } catch(e){}
+      liveProcessorRef.current = null;
+    }
+    if (liveAudioCtxRef.current) {
+      try { liveAudioCtxRef.current.close(); } catch(e){}
+      liveAudioCtxRef.current = null;
+    }
+    if (livePlayerRef.current) {
+      try { livePlayerRef.current.stop(); } catch(e){}
+      livePlayerRef.current = null;
     }
   };
 
   const stopLiveVoiceSession = () => {
     setLiveVoiceActive(false);
     setLiveWsStatus("disconnected");
-    
-    if (liveWsRef.current) {
-      liveWsRef.current.close();
-      liveWsRef.current = null;
-    }
-    if (liveProcessorRef.current) {
-      liveProcessorRef.current.disconnect();
-      liveProcessorRef.current = null;
-    }
-    if (liveAudioCtxRef.current) {
-      liveAudioCtxRef.current.close();
-      liveAudioCtxRef.current = null;
-    }
-    if (livePlayerRef.current) {
-      livePlayerRef.current.stop();
-      livePlayerRef.current = null;
-    }
+    setLiveSessionError(null);
+    cleanupAudioResources();
     setLiveTextTranscript(prev => [...prev, "Real-time audio bridge offline."]);
   };
 
@@ -1392,6 +1772,17 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
 
   // 9. Generate High Quality Images (Image Workshop)
   const handleGenerateImage = async () => {
+    const isProfileIncomplete = !systemSettings.geminiLiveApiKey || 
+                                !systemSettings.userName || 
+                                !systemSettings.userProfession || 
+                                !systemSettings.userLocationName || 
+                                !systemSettings.userBio;
+    if (isProfileIncomplete) {
+      alert("দুঃখিত স্যার, আপনার প্রোফাইল সেটিংস সম্পূর্ণ না হওয়া পর্যন্ত আমি ইমেজ জেনারেট করতে পারবো না। দয়া করে সেটিংস থেকে আপনার API Key ও সমস্ত তথ্য সম্পূর্ণ করুন।\n\n(Sir, profile incomplete. Please set your API key and complete all profile information in Settings first.)");
+      setShowSystemConfig(true);
+      return;
+    }
+
     if (!imagePrompt.trim()) return;
     setImageWorkshopLoading(true);
     setGeneratedImageUrl(null);
@@ -1399,7 +1790,10 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
     try {
       const res = await fetch("/api/gemini/image", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "x-gemini-api-key": systemSettings.geminiLiveApiKey || ""
+        },
         body: JSON.stringify({
           prompt: imagePrompt,
           model: imageModel,
@@ -1454,13 +1848,27 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
   };
 
   const handleAnalyzeUploadImage = async () => {
+    const isProfileIncomplete = !systemSettings.geminiLiveApiKey || 
+                                !systemSettings.userName || 
+                                !systemSettings.userProfession || 
+                                !systemSettings.userLocationName || 
+                                !systemSettings.userBio;
+    if (isProfileIncomplete) {
+      alert("দুঃখিত স্যার, আপনার প্রোফাইল সেটিংস সম্পূর্ণ না হওয়া পর্যন্ত আমি ইমেজ বিশ্লেষণ করতে পারবো না। দয়া করে সেটিংস থেকে আপনার API Key ও সমস্ত তথ্য সম্পূর্ণ করুন।\n\n(Sir, profile incomplete. Please set your API key and complete all profile information in Settings first.)");
+      setShowSystemConfig(true);
+      return;
+    }
+
     if (!uploadImageBase64) return;
     setIsGenerating(true);
     setCurrentView("chat");
     try {
       const res = await fetch("/api/gemini/analyze", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "x-gemini-api-key": systemSettings.geminiLiveApiKey || ""
+        },
         body: JSON.stringify({
           prompt: "Analyze this uploaded device schematic or visual screenshot. Provide a diagnostic summary.",
           base64Image: uploadImageBase64,
@@ -2009,13 +2417,37 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
 
                 {/* Chat Thread */}
                 <div className="flex-1 overflow-y-auto mb-4 border border-sky-500/10 bg-[#030816]/75 p-4 rounded-2xl space-y-4">
+                  {!systemSettings.geminiLiveApiKey && (
+                    <div className="border border-yellow-500/20 bg-yellow-500/5 rounded-2xl p-4 flex items-start gap-3 relative overflow-hidden backdrop-blur-sm">
+                      <div className="absolute top-0 left-0 w-1 h-full bg-yellow-500"></div>
+                      <Sparkles className="w-5 h-5 text-yellow-500 shrink-0 mt-0.5 animate-pulse" />
+                      <div className="flex-1 text-left">
+                        {systemSettings.language === "Bengali" ? (
+                          <>
+                            <div className="text-xs font-bold text-yellow-400 font-mono uppercase tracking-wider mb-1">⚠️ সেন্ট্রাল গ্রিড সতর্কতা (Shared Uplink Active)</div>
+                            <p className="text-[11px] text-gray-300 leading-relaxed font-sans">
+                              আপনি বর্তমানে একটি শেয়ারড ফ্রি এপিআই কি ব্যবহার করছেন, যা যেকোনো সময় ওভারলোড বা লিমিট শেষ হয়ে যেতে পারে। নিরবচ্ছিন্ন সার্ভিসের জন্য দয়া করে <button onClick={() => setShowSystemConfig(true)} className="text-yellow-400 font-bold underline hover:text-yellow-300 transition bg-transparent border-none p-0 cursor-pointer">এখানে ক্লিক করে সেটিংস থেকে আপনার নিজস্ব Gemini API Key যোগ করুন</button>।
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <div className="text-xs font-bold text-yellow-400 font-mono uppercase tracking-wider mb-1">⚠️ CENTRAL GRID WARNING (Shared Uplink Active)</div>
+                            <p className="text-[11px] text-gray-300 leading-relaxed font-sans">
+                              You are currently using a shared free API key, which might get overloaded or hit limit. For uninterrupted service, please <button onClick={() => setShowSystemConfig(true)} className="text-yellow-400 font-bold underline hover:text-yellow-300 transition bg-transparent border-none p-0 cursor-pointer">click here to open Settings and add your own Gemini API Key</button>.
+                            </p>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   {chatMessages.length === 0 && (
                     <div className="flex flex-col items-center justify-center h-full text-center p-6 text-gray-400 space-y-3">
                       <div className="w-16 h-16 rounded-full border border-sky-500/20 flex items-center justify-center bg-[#070d1e]">
                         <MessageSquare className="w-8 h-8 text-sky-400" />
                       </div>
                       <div>
-                        <p className="font-mono text-xs text-sky-400">JARVIS CORE CHAT SECURE</p>
+                        <p className="font-mono text-xs text-sky-400">{assistantName.toUpperCase()} CORE CHAT SECURE</p>
                         <p className="text-sm">I am at your service, Sir. Type your command, ask to browse websites, play YouTube streams, generate graphics or run codes.</p>
                       </div>
                     </div>
@@ -2093,7 +2525,55 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
                                   <div><span className="text-gray-500">Action:</span> <span className="text-sky-300 font-bold">{act.type.toUpperCase()}</span></div>
                                   {act.type === "generate_image" && <div><span className="text-gray-500">Prompt:</span> <span className="text-gray-300 italic">"{act.attrs.prompt}"</span></div>}
                                   {act.type === "open_web" && <div><span className="text-gray-500">Target URL:</span> <span className="text-gray-300 select-all underline">{act.attrs.url}</span></div>}
-                                  {act.type === "play_youtube" && <div><span className="text-gray-500">Song/Query:</span> <span className="text-gray-300 font-bold">{act.attrs.query}</span></div>}
+                                  {act.type === "play_youtube" && (
+                                    <div className="space-y-2 mt-2 border-t border-sky-500/10 pt-2 text-left">
+                                      <div className="flex justify-between items-center bg-sky-950/40 p-2 rounded-lg border border-sky-500/15">
+                                        <div className="min-w-0 flex-1">
+                                          <span className="text-gray-500 block text-[8px] uppercase tracking-wider">Acoustic Link Node</span>
+                                          <span className="text-sky-300 font-mono font-bold text-[11px] block truncate">🎵 {act.attrs.query}</span>
+                                        </div>
+                                        <div className="flex items-center gap-1 bg-[#030d22] px-1.5 py-0.5 rounded border border-sky-500/10 text-[8px] text-emerald-400 font-bold animate-pulse shrink-0 ml-2">
+                                          <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full"></span>
+                                          <span>STREAM ACTIVE</span>
+                                        </div>
+                                      </div>
+                                      
+                                      {/* Miniature embedded player viewport */}
+                                      <div className="relative border border-sky-500/20 bg-black rounded-xl overflow-hidden shadow-2xl aspect-video w-full max-w-[280px] mx-auto">
+                                        <iframe
+                                          src={`https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(act.attrs.query)}&autoplay=1&mute=0`}
+                                          title="In-Bubble YouTube Player"
+                                          className="w-full h-full border-0 absolute inset-0"
+                                          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                          allowFullScreen
+                                        ></iframe>
+                                      </div>
+
+                                      {/* Equalizer Waveform & Synchronization Controls */}
+                                      <div className="bg-[#020512] border border-sky-500/10 rounded-xl p-2 flex items-center justify-between">
+                                        <div className="flex items-center gap-1.5">
+                                          <div className="flex items-end gap-0.5 h-3">
+                                            <div className="w-0.5 bg-sky-400 animate-pulse h-2"></div>
+                                            <div className="w-0.5 bg-sky-400 animate-pulse h-3" style={{ animationDelay: "0.15s" }}></div>
+                                            <div className="w-0.5 bg-sky-400 animate-pulse h-1.5" style={{ animationDelay: "0.3s" }}></div>
+                                            <div className="w-0.5 bg-sky-400 animate-pulse h-2.5" style={{ animationDelay: "0.45s" }}></div>
+                                          </div>
+                                          <span className="text-gray-400 text-[8px] font-mono uppercase tracking-widest">Acoustic Tunnel</span>
+                                        </div>
+                                        <button
+                                          onClick={() => {
+                                            setSandboxYoutubeQuery(act.attrs.query);
+                                            setSandboxActiveTab("media");
+                                            setShowCyberDeck(true);
+                                            triggerYoutubeSearch(act.attrs.query);
+                                          }}
+                                          className="px-2 py-0.5 text-[8px] font-mono bg-sky-500/15 hover:bg-sky-500/25 border border-sky-400/30 text-sky-300 rounded transition cursor-pointer"
+                                        >
+                                          Sync Media Deck →
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
                                   {act.type === "run_code" && <div><span className="text-gray-500">Script:</span> <span className="text-gray-300 font-bold">{act.attrs.title}</span></div>}
                                 </div>
 
@@ -2192,7 +2672,7 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
                       <div className="w-8 h-8 rounded-full border border-teal-500/40 bg-teal-950 flex items-center justify-center animate-spin">
                         <Cpu className="w-4 h-4 text-teal-300" />
                       </div>
-                      <div className="text-xs font-mono text-teal-400">Jarvis is processing instructions...</div>
+                      <div className="text-xs font-mono text-teal-400">{assistantName} is processing instructions...</div>
                     </div>
                   )}
                   <div ref={messageEndRef}></div>
@@ -2389,45 +2869,191 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
 
                     {/* 2. MEDIA DECK (YOUTUBE STREAM) */}
                     {sandboxActiveTab === "media" && (
-                      <div className="flex-1 flex flex-col space-y-3 h-full min-h-0">
+                      <div className="flex-1 flex flex-col space-y-3 h-full min-h-0 text-left">
                         {/* Media Stream Search */}
                         <div className="flex gap-2">
-                          <input
-                            type="text"
-                            value={sandboxYoutubeQuery}
-                            onChange={(e) => setSandboxYoutubeQuery(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" && sandboxYoutubeQuery.trim()) {
-                                setSandboxYoutubeQuery(sandboxYoutubeQuery);
-                              }
-                            }}
-                            placeholder="Enter song name or video term (ইউটিউবে গান খুঁজুন)..."
-                            className="flex-1 bg-gray-950 border border-sky-500/20 rounded-lg px-3 py-1.5 text-xs text-sky-300 font-mono focus:outline-none focus:border-sky-500/40 placeholder-gray-700"
-                          />
+                          <div className="relative flex-1">
+                            <input
+                              type="text"
+                              value={sandboxYoutubeQuery}
+                              onChange={(e) => setSandboxYoutubeQuery(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && sandboxYoutubeQuery.trim()) {
+                                  triggerYoutubeSearch(sandboxYoutubeQuery);
+                                }
+                              }}
+                              placeholder="Enter song name or video term (ইউটিউবে গান খুঁজুন)..."
+                              className="w-full bg-gray-950 border border-sky-500/20 rounded-lg pl-9 pr-3 py-1.5 text-xs text-sky-300 font-mono focus:outline-none focus:border-sky-500/40 placeholder-gray-700"
+                            />
+                            <Search className="w-3.5 h-3.5 text-gray-600 absolute left-3 top-2.5" />
+                          </div>
+                          <button
+                            onClick={() => triggerYoutubeSearch(sandboxYoutubeQuery)}
+                            disabled={sandboxYoutubeLoading}
+                            className="px-3 py-1.5 text-xs font-mono font-bold bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/25 rounded-lg flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                          >
+                            {sandboxYoutubeLoading ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Search className="w-3 h-3" />
+                            )}
+                            <span>Search</span>
+                          </button>
                         </div>
 
-                        {/* YouTube Search Embed */}
-                        <div className="flex-1 border border-sky-500/10 bg-[#020510] rounded-xl overflow-hidden relative min-h-0">
-                          {sandboxYoutubeQuery.trim() ? (
-                            <iframe
-                              src={`https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(sandboxYoutubeQuery)}`}
-                              title="YouTube Stream Deck"
-                              className="w-full h-full border-0"
-                              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                              allowFullScreen
-                            ></iframe>
-                          ) : (
-                            <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center text-gray-500 space-y-2 font-mono">
-                              <span className="text-3xl">🎵</span>
-                              <p className="text-[10px] text-sky-400 uppercase tracking-widest">Acoustic Frequencies</p>
-                              <p className="text-[9px] max-w-xs text-gray-600">Enter a track query above or ask Jarvis: "ইউটিউবে একটি গান চালাও" to feed the stream line.</p>
+                        {/* Interactive Dual-Panel Media Deck */}
+                        <div className="flex-1 grid grid-cols-1 md:grid-cols-5 gap-3 min-h-0">
+                          {/* Left Panel: Dynamic Playback viewport (3/5 cols) */}
+                          <div className="md:col-span-3 flex flex-col space-y-2 min-h-0">
+                            <div 
+                              ref={mediaPlaceholderRef} 
+                              className="flex-1 border border-sky-500/10 bg-black rounded-xl overflow-hidden relative min-h-[220px]"
+                            >
+                              {!sandboxActiveVideoId && (
+                                <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center text-gray-500 space-y-2 font-mono">
+                                  <span className="text-3xl animate-bounce">🎵</span>
+                                  <p className="text-[10px] text-sky-400 uppercase tracking-widest">Acoustic Frequencies</p>
+                                  <p className="text-[9px] max-w-xs text-gray-600">
+                                    Ask Jarvis: "একটি গান চালাও" or enter a query above to stream live frequencies.
+                                  </p>
+                                </div>
+                              )}
                             </div>
-                          )}
+
+                            {/* Stream Controllers */}
+                            {sandboxActiveVideoId && (
+                              <div className="bg-[#020510] border border-sky-500/10 rounded-xl p-2.5 flex items-center justify-between font-mono text-[10px]">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  {/* Waveform Equalizer */}
+                                  <div className="flex items-end gap-0.5 h-3 flex-shrink-0">
+                                    <div className="w-0.5 bg-sky-400 animate-pulse h-2"></div>
+                                    <div className="w-0.5 bg-sky-400 animate-pulse h-3" style={{ animationDelay: "0.15s" }}></div>
+                                    <div className="w-0.5 bg-sky-400 animate-pulse h-1.5" style={{ animationDelay: "0.3s" }}></div>
+                                    <div className="w-0.5 bg-sky-400 animate-pulse h-2.5" style={{ animationDelay: "0.45s" }}></div>
+                                  </div>
+                                  <span className="text-sky-300 truncate max-w-[150px] sm:max-w-[200px]">
+                                    {sandboxYoutubeResults.find(v => v.videoId === sandboxActiveVideoId)?.title || "Streaming track..."}
+                                  </span>
+                                </div>
+
+                                <div className="flex items-center gap-2 flex-shrink-0">
+                                  <button
+                                    onClick={() => {
+                                      const idx = sandboxYoutubeResults.findIndex(v => v.videoId === sandboxActiveVideoId);
+                                      if (idx > 0) {
+                                        setSandboxActiveVideoId(sandboxYoutubeResults[idx - 1].videoId);
+                                      }
+                                    }}
+                                    disabled={sandboxYoutubeResults.findIndex(v => v.videoId === sandboxActiveVideoId) <= 0}
+                                    className="p-1 text-gray-400 hover:text-sky-300 hover:bg-sky-500/10 rounded cursor-pointer disabled:opacity-30"
+                                    title="Previous Track"
+                                  >
+                                    <SkipBack className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      const idx = sandboxYoutubeResults.findIndex(v => v.videoId === sandboxActiveVideoId);
+                                      if (idx >= 0 && idx < sandboxYoutubeResults.length - 1) {
+                                        setSandboxActiveVideoId(sandboxYoutubeResults[idx + 1].videoId);
+                                      }
+                                    }}
+                                    disabled={sandboxYoutubeResults.findIndex(v => v.videoId === sandboxActiveVideoId) >= sandboxYoutubeResults.length - 1}
+                                    className="p-1 text-gray-400 hover:text-sky-300 hover:bg-sky-500/10 rounded cursor-pointer disabled:opacity-30"
+                                    title="Next Track"
+                                  >
+                                    <SkipForward className="w-3.5 h-3.5" />
+                                  </button>
+                                  <a
+                                    href={`https://www.youtube.com/watch?v=${sandboxActiveVideoId}`}
+                                    target="_blank"
+                                    referrerPolicy="no-referrer"
+                                    className="p-1 text-gray-400 hover:text-sky-300 hover:bg-sky-500/10 rounded cursor-pointer"
+                                    title="Open in Native Tab"
+                                  >
+                                    <ExternalLink className="w-3.5 h-3.5" />
+                                  </a>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Right Panel: Interactive Browser Playlist Results (2/5 cols) */}
+                          <div className="md:col-span-2 flex flex-col bg-gray-950/80 border border-sky-500/10 rounded-xl p-2.5 min-h-[150px] md:min-h-0 overflow-hidden">
+                            <div className="flex items-center justify-between border-b border-sky-500/10 pb-2 mb-2 font-mono text-[9px] text-gray-400">
+                              <span className="flex items-center gap-1 font-bold text-sky-400">
+                                <Music className="w-3 h-3" />
+                                <span>CYBER STREAM TUNNEL</span>
+                              </span>
+                              <span>{sandboxYoutubeResults.length} FOUND</span>
+                            </div>
+
+                            <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 text-xs">
+                              {sandboxYoutubeLoading ? (
+                                <div className="h-full flex flex-col items-center justify-center p-4 text-center text-gray-500 font-mono space-y-2">
+                                  <Loader2 className="w-5 h-5 text-sky-400 animate-spin" />
+                                  <span className="text-[9px] text-sky-400/80">TUNING ACOUSTICS...</span>
+                                </div>
+                              ) : sandboxYoutubeResults.length > 0 ? (
+                                sandboxYoutubeResults.map((video, idx) => {
+                                  const isActive = video.videoId === sandboxActiveVideoId;
+                                  return (
+                                    <button
+                                      key={video.videoId}
+                                      onClick={() => {
+                                        setSandboxActiveVideoId(video.videoId);
+                                        setTerminalOutput(prev => [
+                                          ...prev,
+                                          `[CYBERDECK] User manually selected track: "${video.title}"`
+                                        ]);
+                                      }}
+                                      className={`w-full text-left p-1.5 rounded-lg border flex gap-2 transition cursor-pointer group ${
+                                        isActive
+                                          ? "border-sky-400/50 bg-sky-500/15"
+                                          : "border-sky-500/5 bg-gray-900/40 hover:bg-sky-500/5 hover:border-sky-500/15"
+                                      }`}
+                                    >
+                                      {/* Mini Thumbnail */}
+                                      <div className="w-16 h-10 flex-shrink-0 rounded overflow-hidden relative bg-black border border-sky-500/10">
+                                        <img
+                                          src={video.thumbnail}
+                                          alt=""
+                                          className="w-full h-full object-cover"
+                                          referrerPolicy="no-referrer"
+                                        />
+                                        <span className="absolute bottom-0.5 right-0.5 bg-black/80 text-[8px] font-mono px-0.5 py-px text-gray-400 rounded">
+                                          {video.duration}
+                                        </span>
+                                      </div>
+
+                                      {/* Text details */}
+                                      <div className="flex-1 min-w-0 flex flex-col justify-between">
+                                        <p className={`text-[10px] font-medium leading-tight truncate ${isActive ? "text-sky-300 font-bold" : "text-gray-300 group-hover:text-sky-200"}`}>
+                                          {idx + 1}. {video.title}
+                                        </p>
+                                        <p className="text-[8px] font-mono text-gray-500 truncate">
+                                          {video.channel}
+                                        </p>
+                                      </div>
+                                    </button>
+                                  );
+                                })
+                              ) : (
+                                <div className="h-full flex flex-col items-center justify-center p-4 text-center text-gray-600 font-mono text-[9px] space-y-1">
+                                  <span>⏹️ FEED LINE INACTIVE</span>
+                                  <span>Search a song name or video query to build your sandbox browser controller playlist!</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
                         </div>
 
-                        <div className="bg-[#03091e]/80 border border-sky-500/10 p-2 rounded-xl text-[9px] font-mono text-gray-400 flex items-center gap-2">
-                          <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>
-                          <span>YouTube API Tunnel: Stream loaded directly based on client query.</span>
+                        {/* Status bar */}
+                        <div className="bg-[#03091e]/80 border border-sky-500/10 p-2 rounded-xl text-[9px] font-mono text-gray-400 flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                            <span>YouTube Client Tunnel Online: Autoplay active with direct stream controller integration.</span>
+                          </div>
+                          <span className="text-[8px] text-sky-400 uppercase">Jarvis Interactive Browser Engine v1.5</span>
                         </div>
                       </div>
                     )}
@@ -3327,40 +3953,69 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
       </div>
 
       {/* ----------------- SUB-COMPONENTS: VOICE STREAMING CONVERSATION DRAWER ----------------- */}
-      {liveVoiceActive && (
+      {(liveVoiceActive || liveWsStatus === "connecting" || liveSessionError) && (
         <div className="fixed inset-0 bg-[#02050c]/85 backdrop-blur-md flex items-center justify-center z-50 p-4">
-          <div className="max-w-md w-full border border-teal-500/30 bg-[#041224]/95 p-6 rounded-2xl shadow-2xl text-center relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-teal-500 to-sky-500 animate-pulse"></div>
+          <div className={`max-w-md w-full border ${liveSessionError ? 'border-red-500/40 bg-[#120404]/95 shadow-[0_0_30px_rgba(239,68,68,0.2)]' : 'border-teal-500/30 bg-[#041224]/95'} p-6 rounded-2xl shadow-2xl text-center relative overflow-hidden transition-all duration-300`}>
+            <div className={`absolute top-0 left-0 w-full h-1 bg-gradient-to-r ${liveSessionError ? 'from-red-500 to-amber-500' : 'from-teal-500 to-sky-500'} ${liveWsStatus === "connecting" ? 'animate-pulse' : ''}`}></div>
             
             {/* Pulsing visual core */}
-            <div className="w-32 h-32 rounded-full border-[3px] border-teal-400/40 flex items-center justify-center mx-auto mb-6 relative arc-pulse shadow-[0_0_30px_rgba(20,184,166,0.3)]">
-              <div className="w-24 h-24 rounded-full border-[2px] border-dashed border-teal-300/40 flex items-center justify-center">
-                <div className="w-16 h-16 rounded-full bg-teal-500/30 border border-teal-300 flex items-center justify-center animate-pulse">
-                  <Mic className="w-8 h-8 text-teal-300" />
+            <div className={`w-32 h-32 rounded-full border-[3px] ${liveSessionError ? 'border-red-500/40 shadow-[0_0_20px_rgba(239,68,68,0.2)]' : liveWsStatus === "connecting" ? 'border-yellow-500/40 shadow-[0_0_20px_rgba(234,179,8,0.2)]' : 'border-teal-400/40 shadow-[0_0_30px_rgba(20,184,166,0.3)]'} flex items-center justify-center mx-auto mb-6 relative ${!liveSessionError ? 'arc-pulse' : ''}`}>
+              <div className="w-24 h-24 rounded-full border-[2px] border-dashed border-sky-300/40 flex items-center justify-center">
+                <div className={`w-16 h-16 rounded-full ${liveSessionError ? 'bg-red-500/20 border border-red-500' : liveWsStatus === "connecting" ? 'bg-yellow-500/20 border border-yellow-500 animate-pulse' : 'bg-teal-500/30 border border-teal-300 animate-pulse'} flex items-center justify-center`}>
+                  {liveSessionError ? (
+                    <AlertCircle className="w-8 h-8 text-red-400" />
+                  ) : liveWsStatus === "connecting" ? (
+                    <Loader2 className="w-8 h-8 text-yellow-400 animate-spin" />
+                  ) : (
+                    <Mic className="w-8 h-8 text-teal-300" />
+                  )}
                 </div>
               </div>
             </div>
 
-            <h3 className="jarvis-heading text-xl font-bold tracking-wider text-teal-400 uppercase mb-1">LIVE VOICE BRIDGE</h3>
-            <p className="text-[10px] font-mono text-gray-400 mb-6 uppercase flex items-center justify-center gap-1.5">
-              <span className="w-2 h-2 bg-green-500 rounded-full animate-ping"></span>
-              <span>Model: models/gemini-3.1-flash-live-preview</span>
-            </p>
+            {liveSessionError ? (
+              <>
+                <h3 className="jarvis-heading text-xl font-bold tracking-wider text-red-400 uppercase mb-1">UPLINK FAILURE</h3>
+                <p className="text-[10px] font-mono text-gray-400 mb-4 uppercase flex items-center justify-center gap-1.5">
+                  <span className="w-2 h-2 bg-red-500 rounded-full animate-ping"></span>
+                  <span>Grid Status: Offline / Error</span>
+                </p>
+                <div className="mb-4 text-xs text-red-300 bg-red-950/40 border border-red-900/50 rounded-xl p-4 text-left leading-relaxed font-mono">
+                  {liveSessionError}
+                </div>
+              </>
+            ) : liveWsStatus === "connecting" ? (
+              <>
+                <h3 className="jarvis-heading text-xl font-bold tracking-wider text-yellow-400 uppercase mb-1">ESTABLISHING UPLINK</h3>
+                <p className="text-[10px] font-mono text-gray-400 mb-6 uppercase flex items-center justify-center gap-1.5">
+                  <span className="w-2 h-2 bg-yellow-500 rounded-full animate-ping"></span>
+                  <span>Model: models/gemini-3.1-flash-live-preview</span>
+                </p>
+              </>
+            ) : (
+              <>
+                <h3 className="jarvis-heading text-xl font-bold tracking-wider text-teal-400 uppercase mb-1">LIVE VOICE BRIDGE</h3>
+                <p className="text-[10px] font-mono text-gray-400 mb-6 uppercase flex items-center justify-center gap-1.5">
+                  <span className="w-2 h-2 bg-green-500 rounded-full animate-ping"></span>
+                  <span>Model: models/gemini-3.1-flash-live-preview</span>
+                </p>
+              </>
+            )}
 
             {/* Real-time speech transcript log */}
             <div className="border border-teal-500/15 bg-gray-950 p-4 rounded-xl font-mono text-xs text-left text-gray-300 space-y-2 h-44 overflow-y-auto mb-6 scrollbar-thin">
               {liveTextTranscript.map((line, idx) => (
                 <div key={idx} className="leading-relaxed">
-                  <span className="text-teal-400">&gt;&gt; </span>{line}
+                  <span className={liveSessionError && line.includes("[ERROR]") ? "text-red-400" : "text-teal-400"}>&gt;&gt; </span>{line}
                 </div>
               ))}
             </div>
 
             <button
               onClick={stopLiveVoiceSession}
-              className="px-6 py-2.5 bg-red-500/20 hover:bg-red-500/35 border border-red-500/30 text-red-400 font-mono text-xs uppercase rounded-xl transition cursor-pointer"
+              className={`px-6 py-2.5 ${liveSessionError ? 'bg-gray-500/10 hover:bg-gray-500/25 border border-gray-500/30 text-gray-300' : 'bg-red-500/20 hover:bg-red-500/35 border border-red-500/30 text-red-400'} font-mono text-xs uppercase rounded-xl transition cursor-pointer`}
             >
-              🔒 Sever Uplink Connection
+              {liveSessionError ? 'Dismiss Diagnostics' : liveWsStatus === "connecting" ? 'Abort Uplink Attempt' : '🔒 Sever Uplink Connection'}
             </button>
           </div>
         </div>
@@ -3398,6 +4053,21 @@ Make sure to explain what you are doing in friendly Bengali (since you are Bangl
           </div>
         </div>
       )}
+
+      {/* ----------------- PERSISTENT MEDIA STREAM CONTROLLER ----------------- */}
+      <MediaController
+        activeVideoId={sandboxActiveVideoId}
+        setActiveVideoId={setSandboxActiveVideoId}
+        results={sandboxYoutubeResults}
+        activeTab={sandboxActiveTab}
+        setActiveTab={setSandboxActiveTab}
+        showCyberDeck={showCyberDeck}
+        setShowCyberDeck={setShowCyberDeck}
+        placeholderRef={mediaPlaceholderRef}
+        setTerminalOutput={setTerminalOutput}
+        sandboxBrowserUrl={sandboxBrowserUrl}
+        setSandboxBrowserUrl={setSandboxBrowserUrl}
+      />
 
       {/* ----------------- CUSTOM SYSTEM CONFIGURATION MODALS ----------------- */}
       <SystemConfigModal

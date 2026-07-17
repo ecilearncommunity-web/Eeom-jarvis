@@ -27,6 +27,14 @@ service cloudfirestore {
         && request.resource.data.email is string
         && request.resource.data.email.size() <= 256;
       allow delete: if false; // Users cannot delete profiles
+
+      match /config/settings {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /config/{configId} {
+        allow read, write: if isOwner(userId);
+      }
     }
 
     // 3. Notes Collection (Keep substitute & general vault)
