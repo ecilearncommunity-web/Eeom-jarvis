@@ -33,8 +33,11 @@ if (!gotTheLock) {
   app.on('ready', () => {
     createWindow();
     
-    // Auto-update check
+    // Auto-update check periodically
     autoUpdater.checkForUpdatesAndNotify();
+    setInterval(() => {
+      autoUpdater.checkForUpdatesAndNotify();
+    }, 1000 * 60 * 15); // Check every 15 minutes
   });
   
   app.on('open-url', (event, url) => {
@@ -95,14 +98,31 @@ function createWindow() {
 }
 
 // Auto Updater Events
+autoUpdater.on('checking-for-update', () => {
+  if (mainWindow) mainWindow.webContents.send('update-message', 'Checking for updates...');
+});
+
 autoUpdater.on('update-available', () => {
   if (mainWindow) mainWindow.webContents.send('update-message', 'Update available. Downloading...');
+});
+
+autoUpdater.on('update-not-available', () => {
+  if (mainWindow) mainWindow.webContents.send('update-message', 'Up to date');
+});
+
+autoUpdater.on('error', (err) => {
+  if (mainWindow) mainWindow.webContents.send('update-message', 'Error in auto-updater: ' + err.message);
+});
+
+autoUpdater.on('download-progress', (progressObj) => {
+  let log_message = "Downloading update: " + Math.round(progressObj.percent) + '%';
+  if (mainWindow) mainWindow.webContents.send('update-message', log_message);
 });
 
 autoUpdater.on('update-downloaded', () => {
   if (mainWindow) mainWindow.webContents.send('update-message', 'Update downloaded. Restarting to install...');
   setTimeout(() => {
-    autoUpdater.quitAndInstall();
+    autoUpdater.quitAndInstall(true, true); // Silent restart
   }, 4000);
 });
 

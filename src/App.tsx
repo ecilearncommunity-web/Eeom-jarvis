@@ -179,6 +179,9 @@ export default function App() {
   ]);
   const [activeScript, setActiveScript] = useState<AutomationScript | null>(null);
 
+  const [updateStatus, setUpdateStatus] = useState<string>("Up to date");
+  const [isElectronApp, setIsElectronApp] = useState<boolean>(false);
+
   // Jarvis CyberDeck Sandbox States
   const [showCyberDeck, setShowCyberDeck] = useState(true);
   const [sandboxActiveTab, setSandboxActiveTab] = useState<"browser" | "media" | "code" | "image">("browser");
@@ -500,6 +503,7 @@ Make sure to explain what you are doing matching your selected personality templ
   // Handle Electron IPC callbacks
   useEffect(() => {
     if (typeof window !== "undefined" && (window as any).require) {
+      setIsElectronApp(true);
       try {
         const { ipcRenderer } = (window as any).require('electron');
         
@@ -557,7 +561,10 @@ Make sure to explain what you are doing matching your selected personality templ
         });
 
         ipcRenderer.on('update-message', (_event: any, msg: string) => {
-          setTerminalOutput(prev => [...prev, `[SYSTEM UPDATE] ${msg}`]);
+          setUpdateStatus(msg);
+          if (msg.includes("Update available") || msg.includes("Update downloaded")) {
+            setTerminalOutput(prev => [...prev, `[SYSTEM UPDATE] ${msg}`]);
+          }
         });
       } catch (e) {
         console.warn("Electron IPC setup failed:", e);
@@ -2335,6 +2342,16 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
               </span>
             )}
           </button>
+
+          {isElectronApp && (
+            <div className="mt-4 mb-2 p-3 border border-sky-500/10 rounded-xl bg-sky-500/5">
+              <div className="text-[10px] font-mono text-sky-400 uppercase tracking-wide flex items-center gap-1.5 mb-1.5">
+                <RefreshCw className={`w-3.5 h-3.5 ${updateStatus.includes("Updating") || updateStatus.includes("Downloading") ? "animate-spin" : ""}`} />
+                Update Status
+              </div>
+              <div className="text-xs font-sans text-gray-300 break-words">{updateStatus}</div>
+            </div>
+          )}
 
           {/* Quick Config widgets */}
           <div className="hidden lg:flex flex-col gap-3 mt-auto p-3 border border-sky-500/10 rounded-xl bg-[#01050e]">
@@ -4363,6 +4380,19 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           ]);
         }}
       />
+
+      {/* Auto-Updater Toast Notification */}
+      {isElectronApp && updateStatus.includes("Restarting") && (
+        <div className="absolute bottom-6 right-6 z-50 bg-[#030816]/95 border border-sky-500/50 p-4 rounded-xl shadow-[0_0_20px_rgba(14,165,233,0.3)] animate-pulse">
+          <div className="flex items-center gap-3">
+            <RefreshCw className="w-5 h-5 text-sky-400 animate-spin" />
+            <div>
+              <div className="text-sm font-bold text-sky-300">Update Ready</div>
+              <div className="text-xs text-gray-400">{updateStatus}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

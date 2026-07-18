@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Repository
@@ -17,7 +19,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
 
       - name: Install Dependencies
         run: npm install
@@ -26,7 +28,7 @@ jobs:
         run: npm run build
 
       - name: Build Electron App
-        run: npx electron-builder --win -c.extraMetadata.main=electron-main.js
+        run: npx electron-builder --win -c.extraMetadata.main=electron-main.js --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
