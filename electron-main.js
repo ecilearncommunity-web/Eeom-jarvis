@@ -1,9 +1,55 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, shell, ipcMain } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
+const { autoUpdater } = require('electron-updater');
 
 let mainWindow;
 let serverProcess;
+
+// Register custom protocol for authentication deep linking
+if (process.defaultApp) {
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient('jarvis-cyberdeck', process.execPath, [path.resolve(process.argv[1])]);
+  }
+} else {
+  app.setAsDefaultProtocolClient('jarvis-cyberdeck');
+}
+
+const gotTheLock = app.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (event, commandLine, workingDirectory) => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+    // Handle deep link on Windows
+    const url = commandLine.pop();
+    handleDeepLink(url);
+  });
+
+  app.on('ready', () => {
+    createWindow();
+    
+    // Auto-update check
+    autoUpdater.checkForUpdatesAndNotify();
+  });
+  
+  app.on('open-url', (event, url) => {
+    // Handle deep link on macOS
+    handleDeepLink(url);
+  });
+}
+
+function handleDeepLink(url) {
+  if (url && url.startsWith('jarvis-cyberdeck://')) {
+    if (mainWindow) {
+      mainWindow.webContents.send('auth-callback', url);
+    }
+  }
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -14,6 +60,15 @@ function createWindow() {
       contextIsolation: false
     },
     autoHideMenuBar: true
+  });
+
+  // Intercept window.open or links with target="_blank" to open in default browser
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http') && !url.includes('localhost:3000')) {
+      shell.openExternal(url);
+      return { action: 'deny' };
+    }
+    return { action: 'allow' };
   });
 
   const serverPath = path.join(__dirname, 'dist', 'server.cjs');
@@ -39,12 +94,16 @@ function createWindow() {
   }, 3000);
 }
 
-app.whenReady().then(() => {
-  createWindow();
+// Auto Updater Events
+autoUpdater.on('update-available', () => {
+  if (mainWindow) mainWindow.webContents.send('update-message', 'Update available. Downloading...');
+});
 
-  app.on('activate', function () {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
+autoUpdater.on('update-downloaded', () => {
+  if (mainWindow) mainWindow.webContents.send('update-message', 'Update downloaded. Restarting to install...');
+  setTimeout(() => {
+    autoUpdater.quitAndInstall();
+  }, 4000);
 });
 
 app.on('window-all-closed', function () {

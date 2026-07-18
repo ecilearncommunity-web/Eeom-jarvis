@@ -473,6 +473,98 @@ Make sure to explain what you are doing matching your selected personality templ
     handleSendMessageRef.current = handleSendMessage;
   });
 
+  // Handle Electron desktop-auth route
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.location.pathname === "/desktop-auth") {
+      const doAuth = async () => {
+        try {
+          const result = await googleSignIn(false);
+          if (result) {
+            const idToken = await result.user.getIdToken();
+            const accessToken = result.accessToken;
+            // Redirect back to electron app
+            window.location.href = `jarvis-cyberdeck://auth?idToken=${idToken}&accessToken=${accessToken}`;
+            
+            // Show a message in case redirect is blocked
+            document.body.innerHTML = "<div style='background:#030816;color:#0ea5e9;padding:40px;font-family:monospace;text-align:center;'><h2>Authentication Complete</h2><p>You can close this window and return to the JARVIS CyberDeck desktop application.</p></div>";
+          }
+        } catch (e) {
+          console.error(e);
+          document.body.innerHTML = "<div style='background:#030816;color:#ef4444;padding:40px;font-family:monospace;text-align:center;'><h2>Authentication Failed</h2><p>Please try again.</p></div>";
+        }
+      };
+      doAuth();
+    }
+  }, []);
+
+  // Handle Electron IPC callbacks
+  useEffect(() => {
+    if (typeof window !== "undefined" && (window as any).require) {
+      try {
+        const { ipcRenderer } = (window as any).require('electron');
+        
+        ipcRenderer.on('auth-callback', async (_event: any, url: string) => {
+          console.log("Received auth deep link:", url);
+          try {
+            const urlObj = new URL(url);
+            const idToken = urlObj.searchParams.get('idToken');
+            const accessToken = urlObj.searchParams.get('accessToken');
+            
+            if (idToken && accessToken) {
+              setLoadingAuth(true);
+              
+              // We have to use the idToken and accessToken to construct a credential
+              // and sign in to Firebase in the desktop app
+              const { GoogleAuthProvider, signInWithCredential } = await import('firebase/auth');
+              const { auth } = await import('./lib/firebase');
+              
+              const credential = GoogleAuthProvider.credential(idToken, accessToken);
+              const result = await signInWithCredential(auth, credential);
+              
+              setUser(result.user);
+              setToken(accessToken);
+              setNeedsAuth(false);
+              
+              if (typeof window !== "undefined") {
+                localStorage.setItem("jarvis_access_token", accessToken);
+              }
+              
+              await fetchPersistentNotes(result.user.uid);
+              await fetchPersistentScripts(result.user.uid);
+              await syncWorkspace(accessToken);
+
+              try {
+                const freshIdToken = await result.user.getIdToken();
+                setFirebaseIdToken(freshIdToken);
+                await fetch("/api/users/register", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${freshIdToken}`
+                  }
+                });
+              } catch (e) {
+                console.warn("Failed to register in Cloud SQL after electron auth", e);
+              }
+
+              setLoadingAuth(false);
+            }
+          } catch (e: any) {
+            console.error("Auth callback error:", e);
+            setAuthError("Failed to authenticate via desktop link: " + e.message);
+            setLoadingAuth(false);
+          }
+        });
+
+        ipcRenderer.on('update-message', (_event: any, msg: string) => {
+          setTerminalOutput(prev => [...prev, `[SYSTEM UPDATE] ${msg}`]);
+        });
+      } catch (e) {
+        console.warn("Electron IPC setup failed:", e);
+      }
+    }
+  }, []);
+
   // Webhook SSE Listener for proactive AI alerts
   useEffect(() => {
     const sse = new EventSource("/api/notifications/stream");
@@ -748,6 +840,26 @@ Make sure to explain what you are doing matching your selected personality templ
     setLoadingAuth(true);
     setAuthError(null);
     try {
+      const isElectron = typeof window !== "undefined" && navigator.userAgent.toLowerCase().includes("electron");
+      if (isElectron) {
+        // Open the desktop-auth route in the default browser!
+        // We use the hosted URL for production, or local for dev.
+        // Assuming the app uses a known hosted URL when built, or we can just use the current origin if running locally
+        // Actually, if we are in Electron, the origin is likely http://localhost:3000
+        const authUrl = `${window.location.origin}/desktop-auth`;
+        
+        try {
+          const { shell } = (window as any).require('electron');
+          shell.openExternal(authUrl);
+        } catch (e) {
+          window.open(authUrl, "_blank");
+        }
+        
+        // Don't set loading to false immediately, wait for the IPC callback to finish the auth.
+        setTimeout(() => setLoadingAuth(false), 30000); // 30 sec timeout
+        return;
+      }
+
       const result = await googleSignIn(false); // use popup
       if (result) {
         setUser(result.user);
