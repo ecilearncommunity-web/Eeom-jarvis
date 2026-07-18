@@ -22,13 +22,13 @@ jobs:
           node-version: 20
 
       - name: Install Dependencies
-        run: npm install
+        run: npm install --no-package-lock
 
       - name: Build Frontend & Backend
         run: npm run build
 
       - name: Build Electron App
-        run: npx electron-builder --win -c.extraMetadata.main=electron-main.js --publish always
+        run: npx electron-builder --win --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
