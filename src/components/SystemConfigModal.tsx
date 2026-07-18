@@ -20,7 +20,9 @@ import {
   RefreshCw,
   Brain,
   Plus,
-  Trash2
+  Trash2,
+  Network,
+  Link2
 } from "lucide-react";
 import { SystemSettings } from "../types";
 import PersonaSoulModal from "./PersonaSoulModal";
@@ -40,6 +42,61 @@ export default function SystemConfigModal({ isOpen, onClose, settings, userEmail
   const [showOpenRouterKey, setShowOpenRouterKey] = useState(false);
   const [isSoulOpen, setIsSoulOpen] = useState(false);
   const [newMemory, setNewMemory] = useState("");
+
+  const [newApiConn, setNewApiConn] = useState({
+    name: "",
+    baseUrl: "",
+    authHeaderName: "Authorization",
+    authHeaderValue: "",
+    description: ""
+  });
+
+  const [connectionTestResults, setConnectionTestResults] = useState<Record<string, "testing" | "success" | "error">>({});
+
+  const testApiConnection = async (conn: any) => {
+    setConnectionTestResults(prev => ({ ...prev, [conn.id]: "testing" }));
+    try {
+      const headers: any = {};
+      if (conn.authHeaderName && conn.authHeaderValue) {
+        headers[conn.authHeaderName] = conn.authHeaderValue;
+      }
+      const res = await fetch(conn.baseUrl, { method: "GET", headers });
+      if (res.ok) {
+        setConnectionTestResults(prev => ({ ...prev, [conn.id]: "success" }));
+      } else {
+        setConnectionTestResults(prev => ({ ...prev, [conn.id]: "error" }));
+      }
+    } catch (e) {
+      setConnectionTestResults(prev => ({ ...prev, [conn.id]: "error" }));
+    }
+  };
+
+  const handleAddApiConnection = () => {
+    if (!newApiConn.name.trim() || !newApiConn.baseUrl.trim()) return;
+    const item = {
+      id: Math.random().toString(36).substring(7),
+      ...newApiConn
+    };
+    const currentConns = formData.apiConnections || [];
+    setFormData({
+      ...formData,
+      apiConnections: [...currentConns, item]
+    });
+    setNewApiConn({
+      name: "",
+      baseUrl: "",
+      authHeaderName: "Authorization",
+      authHeaderValue: "",
+      description: ""
+    });
+  };
+
+  const handleRemoveApiConnection = (id: string) => {
+    setFormData({
+      ...formData,
+      apiConnections: (formData.apiConnections || []).filter((m) => m.id !== id)
+    });
+  };
 
   const handleAddMemory = () => {
     if (!newMemory.trim()) return;
@@ -112,6 +169,7 @@ export default function SystemConfigModal({ isOpen, onClose, settings, userEmail
                 { id: "agent", label: "Agent Town", sub: "Hermes & Model Config", icon: Cpu },
                 { id: "demo", label: "Demo Video", sub: "How to use Stonic AI", icon: Play },
                 { id: "system", label: "System Settings", sub: "Updates & Performance", icon: Settings },
+                { id: "integrations", label: "Web Integrations", sub: "APIs & Webhooks", icon: Network },
                 { id: "profile", label: "Memory & Profile", sub: "Cognitive Memory Vault", icon: Brain },
                 { id: "whatsapp", label: "WhatsApp Link", sub: "Remote Control", icon: Smartphone }
               ].map((tab) => {
@@ -596,6 +654,151 @@ export default function SystemConfigModal({ isOpen, onClose, settings, userEmail
                   </button>
                 </div>
 
+              </div>
+            )}
+
+            {/* INTEGRATIONS TAB */}
+            {activeTab === "integrations" && (
+              <div className="space-y-5 text-xs text-gray-300">
+                <div>
+                  <h4 className="text-sm font-bold text-gray-100 mb-0.5">Universal Web Integrations</h4>
+                  <p className="text-[10px] text-gray-400">Connect Stonic AI to your external websites (WordPress, Laravel, Shopify, etc.) via REST APIs.</p>
+                </div>
+
+                {/* Add New Connection Form */}
+                <div className="border border-sky-500/10 bg-[#030816]/60 p-4 rounded-xl space-y-3">
+                  <div className="text-[10px] font-bold text-sky-400 uppercase tracking-wide flex items-center gap-1.5 mb-2">
+                    <Link2 className="w-4 h-4 text-sky-400" />
+                    <span>🔗 REGISTER NEW API CONNECTION</span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[9px] text-gray-500 uppercase font-bold mb-1">Connection Name</label>
+                      <input
+                        type="text"
+                        value={newApiConn.name}
+                        onChange={(e) => setNewApiConn({ ...newApiConn, name: e.target.value })}
+                        placeholder="e.g. My WooCommerce Store"
+                        className="w-full bg-gray-950 border border-sky-500/15 rounded-xl px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-sky-500/35"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[9px] text-gray-500 uppercase font-bold mb-1">Base API URL</label>
+                      <input
+                        type="text"
+                        value={newApiConn.baseUrl}
+                        onChange={(e) => setNewApiConn({ ...newApiConn, baseUrl: e.target.value })}
+                        placeholder="https://myshop.com/wp-json/wc/v3"
+                        className="w-full bg-gray-950 border border-sky-500/15 rounded-xl px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-sky-500/35 font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[9px] text-gray-500 uppercase font-bold mb-1">Auth Header Name</label>
+                      <input
+                        type="text"
+                        value={newApiConn.authHeaderName}
+                        onChange={(e) => setNewApiConn({ ...newApiConn, authHeaderName: e.target.value })}
+                        placeholder="e.g. Authorization or X-API-KEY"
+                        className="w-full bg-gray-950 border border-sky-500/15 rounded-xl px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-sky-500/35 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[9px] text-gray-500 uppercase font-bold mb-1">Auth Token/Key</label>
+                      <input
+                        type="password"
+                        value={newApiConn.authHeaderValue}
+                        onChange={(e) => setNewApiConn({ ...newApiConn, authHeaderValue: e.target.value })}
+                        placeholder="Bearer token..."
+                        className="w-full bg-gray-950 border border-sky-500/15 rounded-xl px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-sky-500/35 font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[9px] text-gray-500 uppercase font-bold mb-1">Description (Instructions for AI)</label>
+                    <textarea
+                      value={newApiConn.description}
+                      onChange={(e) => setNewApiConn({ ...newApiConn, description: e.target.value })}
+                      placeholder="e.g. Fetch orders via /orders, check products via /products."
+                      className="w-full bg-gray-950 border border-sky-500/15 rounded-xl px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-sky-500/35 h-16 resize-none"
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleAddApiConnection}
+                    className="w-full py-2 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/25 rounded-xl transition cursor-pointer flex items-center justify-center font-bold tracking-wider text-[10px] uppercase"
+                  >
+                    <Plus className="w-4 h-4 mr-1.5" /> Save API Connection
+                  </button>
+                </div>
+
+                {/* List of Connections */}
+                <div className="space-y-2">
+                  <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">ACTIVE INTEGRATIONS</div>
+                  {(formData.apiConnections && formData.apiConnections.length > 0) ? (
+                    formData.apiConnections.map((conn) => (
+                      <div key={conn.id} className="p-3 bg-gray-950 border border-sky-500/10 rounded-xl relative">
+                        <div className="flex justify-between items-start pr-8">
+                          <div>
+                            <div className="font-bold text-sky-300 text-sm">{conn.name}</div>
+                            <div className="text-[10px] font-mono text-gray-500 mt-0.5">{conn.baseUrl}</div>
+                          </div>
+                        </div>
+                        {conn.description && (
+                          <div className="mt-2 text-[10px] text-gray-400 italic">"{conn.description}"</div>
+                        )}
+                        <div className="mt-2 p-2 bg-sky-500/5 border border-sky-500/10 rounded-lg">
+                          <div className="text-[9px] text-sky-400 font-bold mb-1 uppercase">Webhook URL (For Proactive AI Alerts)</div>
+                          <div className="text-[10px] font-mono text-gray-300 break-all select-all">
+                            {window.location.origin}/api/webhook/{conn.id}
+                          </div>
+                        </div>
+                        <div className="mt-3 flex justify-between items-center border-t border-sky-500/10 pt-3">
+                          <button
+                            type="button"
+                            onClick={() => testApiConnection(conn)}
+                            disabled={connectionTestResults[conn.id] === "testing"}
+                            className="text-[9px] font-bold uppercase tracking-wider bg-gray-900 hover:bg-gray-800 border border-sky-500/20 text-sky-400 px-3 py-1.5 rounded-lg transition disabled:opacity-50 flex items-center gap-1"
+                          >
+                            {connectionTestResults[conn.id] === "testing" ? (
+                              <><span className="w-2 h-2 rounded-full border border-sky-400 border-t-transparent animate-spin"></span> Testing...</>
+                            ) : (
+                              "Test Connection"
+                            )}
+                          </button>
+                          
+                          {connectionTestResults[conn.id] === "success" && (
+                            <span className="text-[9px] font-bold uppercase tracking-wider text-green-400 flex items-center gap-1 bg-green-500/10 px-2 py-1 rounded-md">
+                              <span className="w-1.5 h-1.5 bg-green-400 rounded-full"></span> Connected
+                            </span>
+                          )}
+                          {connectionTestResults[conn.id] === "error" && (
+                            <span className="text-[9px] font-bold uppercase tracking-wider text-red-400 flex items-center gap-1 bg-red-500/10 px-2 py-1 rounded-md">
+                              <span className="w-1.5 h-1.5 bg-red-400 rounded-full"></span> Failed
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveApiConnection(conn.id)}
+                          className="absolute top-3 right-3 text-gray-500 hover:text-red-400 p-1.5 rounded-lg hover:bg-red-500/10 transition"
+                          title="Delete Connection"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="p-4 rounded-xl border border-dashed border-sky-500/10 bg-gray-950/20 text-center text-gray-500 text-[10px] italic">
+                      No external APIs linked yet. Connect your websites above.
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 

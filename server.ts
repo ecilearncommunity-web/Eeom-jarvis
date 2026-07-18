@@ -282,7 +282,7 @@ app.get("/api/youtube/search", async (req, res) => {
 // Multi-turn chat with Jarvis
 app.post("/api/gemini/chat", async (req, res) => {
   try {
-    const { messages, model, thinkingMode, grounding, userLocation, language, customSystemInstruction } = req.body;
+    const { messages, model, thinkingMode, grounding, userLocation, language, customSystemInstruction, apiConnections } = req.body;
     const customKey = req.headers["x-gemini-api-key"] as string | undefined;
     const ai = getGeminiClient(customKey);
 
@@ -292,7 +292,15 @@ app.post("/api/gemini/chat", async (req, res) => {
     }
 
     let sysInstruction = customSystemInstruction || JARVIS_SYSTEM_INSTRUCTION;
-    
+
+    if (apiConnections && Array.isArray(apiConnections) && apiConnections.length > 0) {
+      sysInstruction += `\n\nEXTERNAL API CONNECTIONS AVAILABLE:\n`;
+      apiConnections.forEach((conn: any) => {
+        sysInstruction += `- API ID: "${conn.id}"\n  Name: ${conn.name}\n  Base URL: ${conn.baseUrl}\n  Description/Use Case: ${conn.description}\n`;
+      });
+      sysInstruction += `\nYou have a tool called 'query_external_api'. When the user asks to check data from one of the above websites/APIs, you MUST call this tool, providing the correct 'api_id', 'endpoint_path' (e.g. '/orders', must start with '/'), and 'method' (GET/POST). Do NOT make up the data. Fetch it using the tool first.`;
+    }
+
     // Inject precise real-time temporal context (forcing year 2026 to fix outdated model responses)
     const containerTime = new Date();
     const targetDate = new Date(containerTime);
@@ -364,7 +372,34 @@ app.post("/api/gemini/chat", async (req, res) => {
       }
     };
 
-    tools.push({ functionDeclarations: [playVideoFunctionDeclaration] });
+    const queryExternalApiDeclaration = {
+      name: "query_external_api",
+      description: "Fetches, creates, or updates data from one of the configured external API connections (e.g. WordPress, Laravel, Shopify).",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          api_id: { type: "STRING", description: "The ID of the API connection to use." },
+          endpoint_path: { type: "STRING", description: "The path of the endpoint to hit (e.g. /wp-json/wc/v3/orders)." },
+          method: { type: "STRING", description: "HTTP Method: GET, POST, PUT, DELETE" },
+          body: { type: "STRING", description: "Optional JSON string body for POST/PUT requests." }
+        },
+        required: ["api_id", "endpoint_path", "method"]
+      }
+    };
+
+    const executeLocalCommandDeclaration = {
+      name: "execute_local_command",
+      description: "Executes a shell command on the local Windows PC (e.g. 'start chrome', 'calc', 'shutdown /s', 'dir'). ONLY WORKS when running locally via Electron.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          command: { type: "STRING", description: "The Windows command to execute." }
+        },
+        required: ["command"]
+      }
+    };
+
+    tools.push({ functionDeclarations: [playVideoFunctionDeclaration, queryExternalApiDeclaration, executeLocalCommandDeclaration] });
 
     const config: any = {
       systemInstruction: sysInstruction,
@@ -422,6 +457,101 @@ app.post("/api/gemini/chat", async (req, res) => {
         contents: contents,
         config: config,
       }, customKey);
+
+      // Handle internal tool execution (query_external_api)
+      if (response.functionCalls && response.functionCalls.some((c: any) => c.name === "query_external_api")) {
+        const call = response.functionCalls.find((c: any) => c.name === "query_external_api");
+        const { api_id, endpoint_path, method, body } = call.args;
+        let fetchResult = "";
+
+        try {
+          const conn = apiConnections?.find((c: any) => c.id === api_id);
+          if (!conn) throw new Error("API Connection ID not found.");
+          
+          let fullUrl = conn.baseUrl;
+          if (endpoint_path && endpoint_path.startsWith("/")) {
+            fullUrl += endpoint_path;
+          } else if (endpoint_path) {
+            fullUrl += "/" + endpoint_path;
+          }
+
+          const headers: any = {};
+          if (conn.authHeaderName && conn.authHeaderValue) {
+            headers[conn.authHeaderName] = conn.authHeaderValue;
+          }
+          headers["Content-Type"] = "application/json";
+
+          const fetchOptions: any = { method: method || "GET", headers };
+          if (body && (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE")) {
+            fetchOptions.body = body;
+          }
+
+          const fetchReq = await fetch(fullUrl, fetchOptions);
+          if (!fetchReq.ok) throw new Error(`HTTP Error: ${fetchReq.status}`);
+          fetchResult = await fetchReq.text();
+        } catch (e: any) {
+          fetchResult = `Failed to fetch data: ${e.message}`;
+        }
+
+        // Add the model's call and the tool's response to the conversation
+        contents.push({
+          role: "model",
+          parts: [{ functionCall: call }]
+        });
+        contents.push({
+          role: "user",
+          parts: [{
+            functionResponse: {
+              name: "query_external_api",
+              response: { result: fetchResult }
+            }
+          }]
+        });
+
+        // Call the model again to generate the final response
+        response = await generateContentWithFallback(ai, {
+          model: selectedModel,
+          contents: contents,
+          config: config,
+        }, customKey);
+      } else if (response.functionCalls && response.functionCalls.some((c: any) => c.name === "execute_local_command")) {
+        const call = response.functionCalls.find((c: any) => c.name === "execute_local_command");
+        const { command } = call.args;
+        let execResult = "";
+
+        try {
+          const { exec } = require("child_process");
+          execResult = await new Promise((resolve) => {
+            exec(command, (error: any, stdout: string, stderr: string) => {
+              if (error) resolve(`Error: ${error.message}\nStderr: ${stderr}`);
+              else resolve(`Success:\n${stdout}`);
+            });
+          });
+        } catch (e: any) {
+          execResult = `Failed to execute: ${e.message}`;
+        }
+
+        contents.push({
+          role: "model",
+          parts: [{ functionCall: call }]
+        });
+        contents.push({
+          role: "user",
+          parts: [{
+            functionResponse: {
+              name: "execute_local_command",
+              response: { result: execResult }
+            }
+          }]
+        });
+
+        response = await generateContentWithFallback(ai, {
+          model: selectedModel,
+          contents: contents,
+          config: config,
+        }, customKey);
+      }
+
     } catch (apiError: any) {
       console.warn("Primary chat model call failed, checking fallback:", apiError);
       
@@ -678,6 +808,41 @@ app.post("/api/gemini/analyze", async (req, res) => {
   }
 });
 
+// ---------------------- WEBHOOK & ALERTS (PROACTIVE UPDATES) ----------------------
+const sseClients = new Set<any>();
+
+app.get("/api/notifications/stream", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  
+  sseClients.add(res);
+  
+  req.on("close", () => {
+    sseClients.delete(res);
+  });
+});
+
+app.post("/api/webhook/:id", express.json(), (req, res) => {
+  const { id } = req.params;
+  const payload = req.body;
+  
+  console.log(`Received webhook for connection ${id}:`, payload);
+  
+  const alertMsg = JSON.stringify({
+    type: "webhook_alert",
+    connectionId: id,
+    data: payload,
+    timestamp: new Date().toISOString()
+  });
+
+  sseClients.forEach(client => {
+    client.write(`data: ${alertMsg}\n\n`);
+  });
+
+  res.json({ success: true, message: "Webhook received and broadcasted." });
+});
+
 // ---------------------- HTTP SERVER + WS SERVER INTEGRATION ----------------------
 
 const server = http.createServer(app);
@@ -718,9 +883,19 @@ wss.on("connection", async (clientWs, request) => {
         const voice = payload.voice || "Zephyr";
         const customInstruction = payload.systemInstruction || "";
         const apiKey = payload.apiKey || "";
+        const apiConnections = payload.apiConnections || [];
 
         let finalInstruction = customInstruction || "You are JARVIS, Tony Stark's personal AI butler. Speak directly, confidently, wittily, and keep responses concise. Always refer to the user as Sir or Boss.";
         finalInstruction += `\n\nCRITICAL: Please respond and speak in the language: ${language}. If the user speaks in ${language} or English, understand it and reply in ${language}.`;
+        
+        if (apiConnections && Array.isArray(apiConnections) && apiConnections.length > 0) {
+          finalInstruction += `\n\nEXTERNAL API CONNECTIONS AVAILABLE:\n`;
+          apiConnections.forEach((conn: any) => {
+            finalInstruction += `- API ID: "${conn.id}"\n  Name: ${conn.name}\n  Base URL: ${conn.baseUrl}\n  Description/Use Case: ${conn.description}\n`;
+          });
+          finalInstruction += `\nYou have a tool called 'query_external_api'. When the user asks to check data from one of the above websites/APIs, you MUST call this tool, providing the correct 'api_id', 'endpoint_path' (e.g. '/orders'), and 'method' (GET/POST). Fetch it using the tool first before replying.`;
+        }
+        
         finalInstruction += `\n\nIMPORTANT: You have tools/functions available: 'play_video_on_screen', 'open_web', and 'generate_image'. When the user asks you to play a video, watch a video, play music, open a website, browse a site, or generate an image, you MUST call the appropriate tool. Do NOT just say you are doing it; call the tool to actually trigger it on screen!`;
 
         const liveTools: any = [
@@ -739,6 +914,31 @@ wss.on("connection", async (clientWs, request) => {
                     }
                   },
                   required: ["query"]
+                }
+              },
+              {
+                name: "query_external_api",
+                description: "Fetches, creates, or updates data from one of the configured external API connections (e.g. WordPress, Laravel, Shopify).",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    api_id: { type: "STRING", description: "The ID of the API connection to use." },
+                    endpoint_path: { type: "STRING", description: "The path of the endpoint to hit (e.g. /wp-json/wc/v3/orders)." },
+                    method: { type: "STRING", description: "HTTP Method: GET, POST, PUT, DELETE" },
+                    body: { type: "STRING", description: "Optional JSON string body for POST/PUT requests." }
+                  },
+                  required: ["api_id", "endpoint_path", "method"]
+                }
+              },
+              {
+                name: "execute_local_command",
+                description: "Executes a shell command on the local Windows PC (e.g. 'start chrome', 'calc', 'shutdown /s', 'dir'). ONLY WORKS when running locally via Electron.",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    command: { type: "STRING", description: "The Windows command to execute." }
+                  },
+                  required: ["command"]
                 }
               },
               {
@@ -788,7 +988,7 @@ wss.on("connection", async (clientWs, request) => {
                 tools: liveTools,
               },
               callbacks: {
-                onmessage: (message) => {
+                onmessage: async (message) => {
                   let audio = null;
                   let text = "";
                   if (message.serverContent?.modelTurn?.parts) {
@@ -807,12 +1007,67 @@ wss.on("connection", async (clientWs, request) => {
                     // Send toolCall to the client ws so the frontend can execute it in real-time!
                     clientWs.send(JSON.stringify({ type: "toolCall", toolCall: message.toolCall }));
 
-                    // Immediately respond back to session so the model is satisfied and continues
                     if (message.toolCall.functionCalls) {
-                      const functionResponses = message.toolCall.functionCalls.map((call: any) => ({
-                        id: call.id,
-                        response: { output: { success: true } }
+                      const functionResponses = await Promise.all(message.toolCall.functionCalls.map(async (call: any) => {
+                        if (call.name === "query_external_api") {
+                          const { api_id, endpoint_path, method, body } = call.args;
+                          let fetchResult = "";
+                          try {
+                            const conn = apiConnections?.find((c: any) => c.id === api_id);
+                            if (!conn) throw new Error("API Connection ID not found.");
+                            let fullUrl = conn.baseUrl;
+                            if (endpoint_path && endpoint_path.startsWith("/")) {
+                              fullUrl += endpoint_path;
+                            } else if (endpoint_path) {
+                              fullUrl += "/" + endpoint_path;
+                            }
+                            const headers: any = {};
+                            if (conn.authHeaderName && conn.authHeaderValue) {
+                              headers[conn.authHeaderName] = conn.authHeaderValue;
+                            }
+                            headers["Content-Type"] = "application/json";
+                            
+                            const fetchOptions: any = { method: method || "GET", headers };
+                            if (body && (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE")) {
+                              fetchOptions.body = body;
+                            }
+                            
+                            const fetchReq = await fetch(fullUrl, fetchOptions);
+                            if (!fetchReq.ok) throw new Error(`HTTP Error: ${fetchReq.status}`);
+                            fetchResult = await fetchReq.text();
+                          } catch (e: any) {
+                            fetchResult = `Failed to fetch data: ${e.message}`;
+                          }
+                          return {
+                            id: call.id,
+                            response: { result: fetchResult }
+                          };
+                        } else if (call.name === "execute_local_command") {
+                          const { command } = call.args;
+                          let execResult = "";
+                          try {
+                            const { exec } = require("child_process");
+                            execResult = await new Promise((resolve) => {
+                              exec(command, (error: any, stdout: string, stderr: string) => {
+                                if (error) resolve(`Error: ${error.message}\nStderr: ${stderr}`);
+                                else resolve(`Success:\n${stdout}`);
+                              });
+                            });
+                          } catch (e: any) {
+                            execResult = `Failed to execute: ${e.message}`;
+                          }
+                          return {
+                            id: call.id,
+                            response: { result: execResult }
+                          };
+                        } else {
+                          return {
+                            id: call.id,
+                            response: { output: { success: true } }
+                          };
+                        }
                       }));
+
                       session.send({
                         toolResponse: {
                           functionResponses

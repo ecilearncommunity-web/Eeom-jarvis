@@ -88,6 +88,22 @@ export interface WorkspaceChatMessage {
   createTime?: string;
 }
 
+export interface ExternalApiConnection {
+  id: string;
+  name: string;
+  baseUrl: string;
+  authHeaderName: string;
+  authHeaderValue: string;
+  description: string;
+}
+
+export interface WebhookEvent {
+  id: string;
+  connectionId: string;
+  data: any;
+  timestamp: string;
+}
+
 export interface SystemSettings {
   language: string;
   geminiLiveApiKey: string;
@@ -106,5 +122,6 @@ export interface SystemSettings {
   personalityPrompt: string;
   memories?: Array<{ id: string; content: string; createdAt: string }>;
   customTemplates?: Record<string, string>;
+  apiConnections?: ExternalApiConnection[];
 }
 

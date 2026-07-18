@@ -34,7 +34,8 @@ import {
   WorkspaceKeepNote,
   WorkspaceChatSpace,
   WorkspaceChatMessage,
-  SystemSettings
+  SystemSettings,
+  WebhookEvent
 } from "./types";
 import SystemConfigModal from "./components/SystemConfigModal";
 import OnboardingModal from "./components/OnboardingModal";
@@ -78,7 +79,8 @@ import {
   Video,
   Music,
   SkipForward,
-  SkipBack
+  SkipBack,
+  Activity
 } from "lucide-react";
 import { PCMPlayer, floatTo16BitPCM, arrayBufferToBase64 } from "./lib/audioHelper";
 import { MediaController } from "./components/MediaController";
@@ -115,7 +117,7 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
 
   // System Config States
-  const [currentView, setCurrentView] = useState<"dashboard" | "chat" | "workspace" | "workshop" | "console" | "vault">("dashboard");
+  const [currentView, setCurrentView] = useState<"dashboard" | "chat" | "workspace" | "workshop" | "console" | "vault" | "webhooks">("dashboard");
   const [ttsEnabled, setTtsEnabled] = useState(true);
   const [voiceSelected, setVoiceSelected] = useState<"Zephyr" | "Kore" | "Puck" | "Charon" | "Fenrir">("Zephyr");
   const [thinkingMode, setThinkingMode] = useState(false);
@@ -262,6 +264,10 @@ export default function App() {
 
   const [showSystemConfig, setShowSystemConfig] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  
+  // Webhook Events State
+  const [webhookEvents, setWebhookEvents] = useState<WebhookEvent[]>([]);
+  const [showWebhookToast, setShowWebhookToast] = useState<{show: boolean, name: string}>({show: false, name: ""});
 
   const fetchSystemSettings = async (userId: string) => {
     // Check if client is offline or navigator indicates offline status
@@ -461,6 +467,65 @@ Make sure to explain what you are doing matching your selected personality templ
   useEffect(() => {
     systemSettingsRef.current = systemSettings;
   }, [systemSettings]);
+
+  const handleSendMessageRef = useRef<any>(null);
+  useEffect(() => {
+    handleSendMessageRef.current = handleSendMessage;
+  });
+
+  // Webhook SSE Listener for proactive AI alerts
+  useEffect(() => {
+    const sse = new EventSource("/api/notifications/stream");
+    sse.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === "webhook_alert") {
+          console.log("Received Webhook Alert:", data);
+          const conn = systemSettingsRef.current.apiConnections?.find(c => c.id === data.connectionId);
+          const connName = conn ? conn.name : data.connectionId;
+          const alertMessage = `SYSTEM ALERT: Incoming Webhook Data from [${connName}]. Data payload: ${JSON.stringify(data.data)}`;
+          
+          setWebhookEvents(prev => [{
+            id: Math.random().toString(36).substring(7),
+            connectionId: conn?.name || data.connectionId,
+            data: data.data,
+            timestamp: data.timestamp
+          }, ...prev].slice(0, 50)); // keep last 50
+          
+          setShowWebhookToast({ show: true, name: connName });
+          setTimeout(() => setShowWebhookToast({ show: false, name: "" }), 4000);
+          
+          setTerminalOutput(prev => [...prev, `[WEBHOOK ALERT] Data received from ${connName}`]);
+          
+          if (liveWsRef.current && liveWsRef.current.readyState === WebSocket.OPEN) {
+            liveWsRef.current.send(JSON.stringify({
+              type: "clientContent",
+              clientContent: {
+                turns: [{
+                  role: "user",
+                  parts: [{ text: alertMessage }]
+                }],
+                turnComplete: true
+              }
+            }));
+          } else {
+            setChatMessages(prev => [...prev, {
+              id: Date.now().toString(),
+              role: "user",
+              content: alertMessage,
+              timestamp: new Date()
+            }]);
+            if (handleSendMessageRef.current) {
+              handleSendMessageRef.current(alertMessage);
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Error parsing SSE data", err);
+      }
+    };
+    return () => sse.close();
+  }, []);
 
   // Time & Location
   const [currentTime, setCurrentTime] = useState<string>("");
@@ -1045,15 +1110,12 @@ Make sure to explain what you are doing matching your selected personality templ
     const text = textToSend || inputMessage;
     if (!text.trim() && !customImage) return;
 
-    // Interrupt any active TTS output as the user is dispatching a new instruction
+    // Interrupt any active TTS output and capture user gesture synchronously
     if (ttsPlayerRef.current) {
-      try {
-        ttsPlayerRef.current.stop();
-      } catch (e) {
-        console.warn("Failed to stop current speech playback:", e);
-      }
-      ttsPlayerRef.current = null;
+      try { ttsPlayerRef.current.stop(); } catch (e) {}
     }
+    ttsPlayerRef.current = new PCMPlayer(24000);
+    try { ttsPlayerRef.current.init(); } catch (e) {}
 
     // Gentle terminal status update if API key or name is missing, but non-blocking
     const isProfileUnset = !systemSettings.geminiLiveApiKey || !systemSettings.userName;
@@ -1104,7 +1166,8 @@ Make sure to explain what you are doing matching your selected personality templ
           grounding: groundingMode,
           userLocation,
           language: systemSettings.language,
-          customSystemInstruction: getCompiledSystemInstruction(systemSettings)
+          customSystemInstruction: getCompiledSystemInstruction(systemSettings),
+          apiConnections: systemSettings.apiConnections
         })
       });
 
@@ -1352,14 +1415,11 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
 
   // 6. Text-to-Speech (Speaking back responses)
   const speakResponse = async (text: string) => {
-    // Stop any existing TTS playback to prevent overlapping voice tracks
-    if (ttsPlayerRef.current) {
-      try {
-        ttsPlayerRef.current.stop();
-      } catch (e) {
-        console.warn("Failed to stop previous TTS:", e);
-      }
-      ttsPlayerRef.current = null;
+    // Note: ttsPlayerRef.current is usually initialized synchronously in handleSendMessage
+    // to capture user gestures, but we check and init here just in case.
+    if (!ttsPlayerRef.current) {
+      ttsPlayerRef.current = new PCMPlayer(24000);
+      try { ttsPlayerRef.current.init(); } catch(e){}
     }
 
     // Strip action tags, markdown blocks, HTML/XML elements, and brackets from text to make TTS clear
@@ -1387,11 +1447,9 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
         })
       });
       const data = await res.json();
-      if (data.audio) {
-        // Play back PCM and track reference for dynamic cancellation
-        const player = new PCMPlayer(24000);
-        ttsPlayerRef.current = player;
-        player.playChunk(data.audio);
+      if (data.audio && ttsPlayerRef.current) {
+        // Play back PCM
+        ttsPlayerRef.current.playChunk(data.audio);
       }
     } catch (err) {
       console.error("TTS Output Error:", err);
@@ -1406,14 +1464,26 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
     setLiveTextTranscript(["Initializing real-time audio bridge...", "Status: Dialing central server..."]);
     setLiveWsStatus("connecting");
 
+    // Initialize Audio Contexts synchronously on user click to bypass browser autoplay policies
+    try {
+      if (liveAudioCtxRef.current) {
+        try { liveAudioCtxRef.current.close(); } catch(e){}
+      }
+      liveAudioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      
+      if (livePlayerRef.current) {
+        try { livePlayerRef.current.stop(); } catch(e){}
+      }
+      livePlayerRef.current = new PCMPlayer(24000);
+      livePlayerRef.current.init();
+    } catch (e) {
+      console.warn("Failed to pre-init audio contexts:", e);
+    }
+
     try {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(`${protocol}//${window.location.host}/api/live-ws`);
       liveWsRef.current = ws;
-
-      // Output player (24kHz for Live API)
-      const player = new PCMPlayer(24000);
-      livePlayerRef.current = player;
 
       ws.onopen = () => {
         // Send setup parameters immediately over the WebSocket connection
@@ -1422,7 +1492,8 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           language: systemSettings.language,
           voice: systemSettings.voicePersona,
           systemInstruction: getCompiledSystemInstruction(systemSettings),
-          apiKey: systemSettings.geminiLiveApiKey || ""
+          apiKey: systemSettings.geminiLiveApiKey || "",
+          apiConnections: systemSettings.apiConnections
         }));
       };
 
@@ -1435,8 +1506,9 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
 
           // Start capturing mic at 16kHz PCM
           try {
-            const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-            liveAudioCtxRef.current = audioCtx;
+            const audioCtx = liveAudioCtxRef.current;
+            if (!audioCtx) throw new Error("Audio Context missing");
+            if (audioCtx.state === "suspended") await audioCtx.resume();
 
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             const source = audioCtx.createMediaStreamSource(stream);
@@ -1460,7 +1532,9 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           }
         }
         if (payload.type === "audio" && payload.audio) {
-          player.playChunk(payload.audio);
+          if (livePlayerRef.current) {
+            livePlayerRef.current.playChunk(payload.audio);
+          }
         }
         if (payload.type === "toolCall" && payload.toolCall?.functionCalls) {
           for (const call of payload.toolCall.functionCalls) {
@@ -1547,7 +1621,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           }
         }
         if (payload.type === "interrupted") {
-          player.stop();
+          if (livePlayerRef.current) livePlayerRef.current.stop();
           liveAssistantTextBufferRef.current = "";
           setLiveTextTranscript(prev => [...prev, "[ALERT]: Transcription Interrupted."]);
         }
@@ -1848,6 +1922,13 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
   };
 
   const handleAnalyzeUploadImage = async () => {
+    // Synchronously grab user gesture for potential TTS playback
+    if (ttsPlayerRef.current) {
+      try { ttsPlayerRef.current.stop(); } catch (e) {}
+    }
+    ttsPlayerRef.current = new PCMPlayer(24000);
+    try { ttsPlayerRef.current.init(); } catch (e) {}
+
     const isProfileIncomplete = !systemSettings.geminiLiveApiKey || 
                                 !systemSettings.userName || 
                                 !systemSettings.userProfession || 
@@ -2124,6 +2205,23 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           >
             <CheckSquare className="w-4 h-4" />
             <span>Keep Vault</span>
+          </button>
+          
+          <button
+            onClick={() => setCurrentView("webhooks")}
+            className={`flex items-center gap-3 px-4 py-3 rounded-xl font-mono text-xs tracking-wider uppercase transition cursor-pointer shrink-0 ${
+              currentView === "webhooks"
+                ? "bg-sky-500/20 text-sky-300 border border-sky-400/30 shadow-[0_0_15px_rgba(14,165,233,0.15)]"
+                : "text-gray-400 hover:text-gray-200 hover:bg-sky-500/5 border border-transparent"
+            }`}
+          >
+            <Activity className="w-4 h-4" />
+            <span>Webhooks</span>
+            {webhookEvents.length > 0 && (
+              <span className="ml-auto bg-sky-500 text-[#030816] text-[9px] font-bold px-1.5 py-0.5 rounded-full">
+                {webhookEvents.length}
+              </span>
+            )}
           </button>
 
           {/* Quick Config widgets */}
@@ -3949,6 +4047,53 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
             </div>
           )}
 
+          {currentView === "webhooks" && (
+            <div className="flex flex-col h-full space-y-6">
+              <div className="flex justify-between items-end border-b border-sky-500/10 pb-4">
+                <div>
+                  <h2 className="jarvis-heading text-2xl font-bold tracking-wider text-sky-400 uppercase">Incoming Webhooks</h2>
+                  <p className="text-gray-400 text-xs mt-1 font-mono">Live stream of cross-domain alerts from API Connections.</p>
+                </div>
+                {webhookEvents.length > 0 && (
+                  <button 
+                    onClick={() => setWebhookEvents([])}
+                    className="text-[10px] text-gray-500 hover:text-sky-400 uppercase font-mono tracking-wider transition border border-gray-800 hover:border-sky-500/30 px-3 py-1.5 rounded-lg bg-gray-950"
+                  >
+                    Clear Logs
+                  </button>
+                )}
+              </div>
+              
+              <div className="flex-1 overflow-y-auto space-y-3 pb-20">
+                {webhookEvents.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-64 text-center p-8 border border-dashed border-sky-500/10 rounded-2xl bg-gray-950/20">
+                    <Activity className="w-8 h-8 text-sky-500/30 mb-3" />
+                    <h3 className="text-sm font-bold text-gray-400 mb-1">Awaiting Telemetry</h3>
+                    <p className="text-[10px] text-gray-500 font-mono">Configure API Connections in Settings to receive live webhook payloads.</p>
+                  </div>
+                ) : (
+                  webhookEvents.map(evt => (
+                    <div key={evt.id} className="p-4 border border-sky-500/15 rounded-xl bg-[#030816]/75 relative overflow-hidden group">
+                      <div className="absolute left-0 top-0 bottom-0 w-1 bg-sky-500 group-hover:bg-cyan-400 transition-colors"></div>
+                      <div className="flex justify-between items-start mb-2 pl-3">
+                        <div className="flex items-center gap-2">
+                          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.8)]"></span>
+                          <span className="font-bold text-sky-300 text-xs uppercase tracking-wider">{evt.connectionId}</span>
+                        </div>
+                        <span className="text-[9px] text-gray-500 font-mono">{new Date(evt.timestamp).toLocaleTimeString()}</span>
+                      </div>
+                      <div className="pl-3 mt-2">
+                        <pre className="text-[10px] font-mono text-gray-300 bg-gray-950 p-3 rounded-lg border border-sky-500/10 overflow-x-auto">
+                          {JSON.stringify(evt.data, null, 2)}
+                        </pre>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
         </main>
       </div>
 
@@ -4020,6 +4165,19 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           </div>
         </div>
       )}
+
+      {/* ----------------- SUB-COMPONENTS: WEBHOOK TOAST ----------------- */}
+      <div className={`fixed top-4 right-4 z-50 transition-all duration-500 transform ${showWebhookToast.show ? "translate-y-0 opacity-100" : "-translate-y-full opacity-0 pointer-events-none"}`}>
+        <div className="bg-[#030816]/95 border border-sky-500/30 shadow-[0_0_20px_rgba(14,165,233,0.2)] backdrop-blur-md px-5 py-3 rounded-2xl flex items-center gap-3">
+          <div className="w-8 h-8 rounded-full bg-sky-500/20 border border-sky-400 flex items-center justify-center">
+            <Activity className="w-4 h-4 text-sky-300 animate-pulse" />
+          </div>
+          <div>
+            <div className="text-[10px] font-bold text-sky-400 uppercase tracking-widest">Incoming Telemetry</div>
+            <div className="text-xs text-gray-200 font-mono mt-0.5">{showWebhookToast.name}</div>
+          </div>
+        </div>
+      </div>
 
       {/* ----------------- SUB-COMPONENTS: ACTION CONFIRMATION MODAL (MANDATORY) ----------------- */}
       {pendingAction && (
