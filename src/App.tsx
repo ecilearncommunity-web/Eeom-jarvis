@@ -42,6 +42,7 @@ import OnboardingModal from "./components/OnboardingModal";
 import { CyberdeckLogo } from "./components/CyberdeckLogo";
 import NeuralSandbox from "./components/NeuralSandbox";
 import NeuralOrbitVisualizer from "./components/NeuralOrbitVisualizer";
+import SpaceBackground from "./components/SpaceBackground";
 import { 
   Terminal, 
   MessageSquare, 
@@ -2181,35 +2182,42 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
   }
 
   return (
-    <div className="min-h-screen bg-[#02050c] text-gray-100 flex flex-col font-sans relative overflow-hidden">
+    <div className="min-h-screen bg-black text-gray-100 flex flex-col font-sans relative overflow-hidden">
+      {/* Dynamic Starry Space Background */}
+      <SpaceBackground />
+
       {/* Background Grid Lines & Glowing Elements */}
       <div className="absolute top-0 left-0 w-full h-full pointer-events-none grid-overlay z-0"></div>
       <div className="absolute top-0 left-0 w-full h-full pointer-events-none scanline z-0"></div>
 
-      {/* Floating Header */}
-      <header className="border-b border-sky-500/20 bg-[#04091a]/95 px-6 py-4 flex items-center justify-between relative z-10 backdrop-blur-md">
+      {/* Floating Space Command Header */}
+      <header className="border-b border-cyan-500/20 bg-black/75 px-6 py-4 flex items-center justify-between relative z-10 backdrop-blur-md">
         <div className="flex items-center gap-3">
-          {/* Cyberdeck Logo */}
-          <CyberdeckLogo className="w-10 h-10 drop-shadow-[0_0_8px_rgba(16,185,129,0.4)]" />
+          {/* Cybernetic Display Logo */}
+          <div className="w-10 h-10 bg-cyan-500/5 rounded-xl flex items-center justify-center border border-cyan-500/20 shadow-[0_0_12px_rgba(6,182,212,0.15)] animate-pulse-slow shrink-0">
+            <svg className="w-6 h-6 stroke-cyan-400 fill-none" viewBox="0 0 24 24" strokeWidth="2.5">
+              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+            </svg>
+          </div>
           <div>
-            <h1 className="jarvis-heading font-bold text-lg tracking-wider text-sky-400">J.A.R.V.I.S.</h1>
-            <div className="text-[10px] text-gray-400 font-mono flex items-center gap-1">
-              <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-ping"></span>
-              <span>Central Processor Active</span>
+            <h1 className="font-orbitron font-bold text-base sm:text-lg tracking-[2px] text-white">RAHMAN HABIB AI</h1>
+            <div className="text-[10px] text-cyan-400 font-orbitron font-semibold tracking-wider flex items-center gap-1.5 mt-0.5">
+              <span className="w-1.5 h-1.5 bg-cyan-400 rounded-full shadow-[0_0_8px_#00f3ff] animate-ping"></span>
+              <span>DEEP SPACE COMMAND</span>
             </div>
           </div>
         </div>
 
         {/* Global Controls & Status */}
         <div className="flex items-center gap-6">
-          <div className="hidden md:flex items-center gap-4 text-xs font-mono border-r border-sky-500/10 pr-6">
-            <div className="flex items-center gap-1.5 text-gray-300">
-              <Clock className="w-3.5 h-3.5 text-sky-400" />
+          <div className="hidden md:flex items-center gap-4 text-xs font-mono border-r border-cyan-500/10 pr-6">
+            <div className="flex items-center gap-2 text-slate-300 bg-black/40 px-3 py-1.5 rounded-lg border border-cyan-500/10 font-bold">
+              <Clock className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
               <span>{currentTime}</span>
             </div>
             {userLocation && (
-              <div className="flex items-center gap-1.5 text-gray-300">
-                <MapPin className="w-3.5 h-3.5 text-sky-400" />
+              <div className="flex items-center gap-1.5 text-gray-400">
+                <MapPin className="w-3.5 h-3.5 text-cyan-400" />
                 <span>GRID: {userLocation.latitude.toFixed(2)}, {userLocation.longitude.toFixed(2)}</span>
               </div>
             )}
@@ -2221,22 +2229,22 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
               referrerPolicy="no-referrer"
               src={user?.photoURL || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80"} 
               alt="Boss profile" 
-              className="w-8 h-8 rounded-full border border-sky-500/40"
+              className="w-8 h-8 rounded-full border-2 border-cyan-400 shadow-[0_0_8px_rgba(6,182,212,0.3)]"
             />
             <div className="hidden sm:block text-left">
-              <div className="text-xs font-semibold text-sky-300">Welcome, Boss</div>
-              <div className="text-[10px] text-gray-400 font-mono truncate max-w-[120px]">{user?.email}</div>
+              <div className="text-xs font-bold text-white font-orbitron tracking-wide">Habibur Rahman</div>
+              <div className="text-[9px] text-gray-400 font-mono tracking-wider uppercase">Amazon Galaxy Commander</div>
             </div>
             <button 
               onClick={() => setShowSystemConfig(true)}
-              className="p-1.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 rounded-lg transition duration-150 cursor-pointer animate-pulse-slow"
+              className="p-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/20 rounded-lg transition duration-150 cursor-pointer hover:rotate-45"
               title="System Configuration"
             >
               <Settings className="w-4 h-4" />
             </button>
             <button 
               onClick={handleLogout}
-              className="p-1.5 bg-sky-500/10 hover:bg-red-500/20 text-sky-400 hover:text-red-400 border border-sky-500/20 hover:border-red-500/30 rounded-lg transition duration-150 cursor-pointer"
+              className="p-1.5 bg-cyan-500/10 hover:bg-red-500/20 text-cyan-400 hover:text-red-400 border border-cyan-500/20 hover:border-red-500/30 rounded-lg transition duration-150 cursor-pointer"
               title="De-authorize Jarvis"
             >
               <LogOut className="w-4 h-4" />

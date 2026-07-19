@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&family=Orbitron:wght@500;700;900&display=swap');
 
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
@@ -12,180 +12,87 @@
   font-family: 'Space Grotesk', sans-serif;
 }
 
-/* Light Theme Overrides - Pure White, Off-White, Elegant Slates - Absolutely NO Black/Ultra-Dark Backgrounds */
-:root {
-  background-color: #f8fafc !important;
-  color: #0f172a !important;
+.font-orbitron {
+  font-family: 'Orbitron', sans-serif;
 }
 
-body {
-  background-color: #f8fafc !important;
-  color: #0f172a !important;
-  font-family: var(--font-sans);
+/* Scrollbars - Deep Space Command Style */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
 }
-
-/* Universal Background overrides to white/light-gray */
-[class*="bg-[#02050c]"],
-[class*="bg-[#02050f]"],
-[class*="bg-[#020510]"],
-[class*="bg-[#020512]"],
-[class*="bg-[#010309]"],
-[class*="bg-[#010410]"],
-[class*="bg-[#01050e]"] {
-  background-color: #f8fafc !important; /* slate-50 */
-}
-
-[class*="bg-[#030712]"],
-[class*="bg-[#030713]"],
-[class*="bg-[#030816]"],
-[class*="bg-[#03091e]"],
-[class*="bg-[#030d22]"],
-[class*="bg-[#04091a]"],
-[class*="bg-[#040a1b]"],
-[class*="bg-[#040c21]"],
-[class*="bg-[#041224]"],
-[class*="bg-[#050e1f]"],
-[class*="bg-[#050e24]"],
-[class*="bg-[#070d1e]"] {
-  background-color: #ffffff !important; /* Elegant white panels */
-}
-
-/* Darker elements to slate-100 */
-[class*="bg-gray-950"],
-[class*="bg-slate-950"],
-[class*="bg-[#120404]"] {
-  background-color: #f1f5f9 !important; /* slate-100 */
-}
-
-/* Dialogue panel, terminal text & logs area light overrides */
-.bg-black,
-.bg-gray-900,
-.bg-slate-900 {
-  background-color: #ffffff !important;
-}
-
-/* Inputs, textareas, selects */
-input, textarea, select {
-  background-color: #ffffff !important;
-  color: #0f172a !important;
-  border: 1px solid #cbd5e1 !important;
-}
-
-input::placeholder, textarea::placeholder {
-  color: #94a3b8 !important;
-}
-
-/* Navigation buttons & active tabs */
-nav button {
-  border-color: #e2e8f0 !important;
-}
-
-/* High contrast text color overrides */
-.text-gray-100, .text-slate-100 { color: #0f172a !important; }
-.text-gray-200, .text-slate-200 { color: #1e293b !important; }
-.text-gray-300, .text-slate-300 { color: #334155 !important; }
-.text-gray-400, .text-slate-400 { color: #475569 !important; }
-.text-gray-500, .text-slate-500 { color: #64748b !important; }
-.text-white { color: #0f172a !important; }
-
-/* Sky text colors should be dark blue/sky in light mode */
-.text-sky-300 { color: #0284c7 !important; } /* sky-600 */
-.text-sky-400 { color: #0369a1 !important; } /* sky-700 */
-.text-sky-500 { color: #075985 !important; } /* sky-800 */
-
-/* Specific borders styling to clean light gray borders */
-[class*="border-sky-500/10"],
-[class*="border-sky-500/15"],
-[class*="border-sky-500/20"],
-[class*="border-sky-500/30"],
-[class*="border-sky-500/40"],
-[class*="border-sky-500/50"],
-[class*="border-gray-800"],
-[class*="border-gray-900"] {
-  border-color: #e2e8f0 !important; /* light slate-200 border */
-}
-
-/* Card wrappers, popups, and sidebar styling enhancements */
-.max-w-md,
-[class*="rounded-xl"],
-[class*="rounded-2xl"] {
-  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.05) !important;
-}
-
-/* Scrollbars */
 ::-webkit-scrollbar-track {
-  background: #f1f5f9 !important;
+  background: rgba(0, 0, 0, 0.3) !important;
 }
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1 !important;
+  background: rgba(0, 243, 255, 0.2) !important;
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8 !important;
+  background: rgba(0, 243, 255, 0.4) !important;
 }
 
-/* Cybernetic Scanlines & Overlays in Light mode */
+/* Grid & scanlines */
 .grid-overlay {
-  background-size: 40px 40px;
-  background-image: linear-gradient(to right, rgba(14, 165, 233, 0.02) 1px, transparent 1px),
-                    linear-gradient(to bottom, rgba(14, 165, 233, 0.02) 1px, transparent 1px) !important;
+  background-size: 30px 30px;
+  background-image: linear-gradient(to right, rgba(0, 243, 255, 0.02) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(0, 243, 255, 0.02) 1px, transparent 1px);
 }
 
 .scanline {
   background: linear-gradient(
     to bottom,
-    rgba(255,255,255,0),
-    rgba(14, 165, 233, 0.01) 50%,
-    rgba(255,255,255,0)
-  ) !important;
+    rgba(255, 255, 255, 0),
+    rgba(0, 243, 255, 0.015) 50%,
+    rgba(255, 255, 255, 0)
+  );
+  animation: scanline-move 8s linear infinite;
 }
 
-/* Adjust Terminal / Console output color to match light theme */
-.font-mono {
-  color: #334155 !important;
-}
-.font-mono span, .font-mono div {
-  color: #334155 !important;
+@keyframes scanline-move {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100%); }
 }
 
-/* Active scripts, active item colors */
-[class*="bg-sky-500/10"],
-[class*="bg-sky-500/5"],
-.bg-sky-950 {
-  background-color: #f0f9ff !important; /* light sky-50 */
+/* Curved Bezier lines (Dynamic Solar Core) */
+.curved-data-link {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 6;
+  animation: flow-dash 1.2s linear infinite, color-pulse 4s ease-in-out infinite alternate;
 }
 
-[class*="bg-sky-500/20"] {
-  background-color: #e0f2fe !important; /* light sky-100 */
+@keyframes flow-dash {
+  to { stroke-dashoffset: -10; }
 }
 
-/* Teal colors mapping for Assistant bubbles and indicators */
-.bg-teal-950,
-[class*="bg-teal-950"] {
-  background-color: #f0fdfa !important; /* light teal-50 */
+@keyframes color-pulse {
+  0% { stroke: rgba(255, 255, 255, 0.6); }
+  100% { stroke: var(--planet-color); filter: drop-shadow(0 0 3px var(--planet-color)); }
 }
 
-.text-teal-300,
-.text-teal-400 {
-  color: #0d9488 !important; /* teal-600 */
+/* 3D Saturn Ring styling matching user design */
+.p-saturn {
+  position: relative;
+}
+.p-saturn::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 170%;
+  height: 38%;
+  transform: translate(-50%, -50%) rotate(-18deg);
+  border-radius: 50%;
+  border: 5px solid rgba(168, 85, 247, 0.4);
+  border-top-color: transparent;
+  border-bottom-color: rgba(168, 85, 247, 0.7);
+  box-shadow: 0 0 8px rgba(168, 85, 247, 0.4);
+  z-index: -1;
+  pointer-events: none;
 }
 
-.text-teal-500 {
-  color: #0f766e !important; /* teal-700 */
+/* Pulsing text animations */
+.animate-pulse-slow {
+  animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
-
-[class*="border-teal-500"] {
-  border-color: #ccfbf1 !important; /* light teal border */
-}
-
-@keyframes orbit-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-
-
