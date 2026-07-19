@@ -40,6 +40,7 @@ import {
 import SystemConfigModal from "./components/SystemConfigModal";
 import OnboardingModal from "./components/OnboardingModal";
 import { CyberdeckLogo } from "./components/CyberdeckLogo";
+import NeuralSandbox from "./components/NeuralSandbox";
 import { 
   Terminal, 
   MessageSquare, 
@@ -118,7 +119,7 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
 
   // System Config States
-  const [currentView, setCurrentView] = useState<"dashboard" | "chat" | "workspace" | "workshop" | "console" | "vault" | "webhooks">("dashboard");
+  const [currentView, setCurrentView] = useState<"dashboard" | "chat" | "workspace" | "workshop" | "console" | "vault" | "webhooks" | "neural_sandbox">("dashboard");
   const [ttsEnabled, setTtsEnabled] = useState(true);
   const [voiceSelected, setVoiceSelected] = useState<"Zephyr" | "Kore" | "Puck" | "Charon" | "Fenrir">("Zephyr");
   const [thinkingMode, setThinkingMode] = useState(false);
@@ -2331,6 +2332,18 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
             )}
           </button>
 
+          <button
+            onClick={() => setCurrentView("neural_sandbox")}
+            className={`flex items-center gap-3 px-4 py-3 rounded-xl font-mono text-xs tracking-wider uppercase transition cursor-pointer shrink-0 ${
+              currentView === "neural_sandbox"
+                ? "bg-emerald-500/10 text-emerald-600 border border-emerald-400/30 shadow-[0_0_15px_rgba(16,185,129,0.1)]"
+                : "text-gray-400 hover:text-gray-200 hover:bg-emerald-500/5 border border-transparent"
+            }`}
+          >
+            <Cpu className="w-4 h-4 text-emerald-600" />
+            <span>Neural Sandbox</span>
+          </button>
+
           {isElectronApp && (
             <div className="mt-4 mb-2 p-3 border border-sky-500/10 rounded-xl bg-sky-500/5">
               <div className="text-[10px] font-mono text-sky-400 uppercase tracking-wide flex items-center gap-1.5 mb-1.5">
@@ -4209,6 +4222,13 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
                 )}
               </div>
             </div>
+          )}
+
+          {currentView === "neural_sandbox" && (
+            <NeuralSandbox 
+              userApiKey={systemSettings.geminiLiveApiKey || ""} 
+              preferredModel={preferredModel} 
+            />
           )}
 
         </main>
