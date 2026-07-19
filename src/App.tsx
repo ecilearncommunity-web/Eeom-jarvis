@@ -41,6 +41,7 @@ import SystemConfigModal from "./components/SystemConfigModal";
 import OnboardingModal from "./components/OnboardingModal";
 import { CyberdeckLogo } from "./components/CyberdeckLogo";
 import NeuralSandbox from "./components/NeuralSandbox";
+import NeuralOrbitVisualizer from "./components/NeuralOrbitVisualizer";
 import { 
   Terminal, 
   MessageSquare, 
@@ -120,6 +121,7 @@ export default function App() {
 
   // System Config States
   const [currentView, setCurrentView] = useState<"dashboard" | "chat" | "workspace" | "workshop" | "console" | "vault" | "webhooks" | "neural_sandbox">("dashboard");
+  const [rightPanelTab, setRightPanelTab] = useState<"telemetry" | "logs" | "sensors">("telemetry");
   const [ttsEnabled, setTtsEnabled] = useState(true);
   const [voiceSelected, setVoiceSelected] = useState<"Zephyr" | "Kore" | "Puck" | "Charon" | "Fenrir">("Zephyr");
   const [thinkingMode, setThinkingMode] = useState(false);
@@ -2243,194 +2245,302 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
         </div>
       </header>
 
-      {/* Main Framework Grid */}
-      <div className="flex-1 flex flex-col lg:flex-row relative z-10 max-h-[calc(100vh-73px)] overflow-hidden">
-        
-        {/* Navigation Deck */}
-        <nav className="w-full lg:w-64 bg-[#030816]/90 border-r border-sky-500/10 flex flex-row lg:flex-col p-4 gap-2 overflow-x-auto lg:overflow-x-visible">
-          <button
-            onClick={() => setCurrentView("dashboard")}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl font-mono text-xs tracking-wider uppercase transition cursor-pointer shrink-0 ${
-              currentView === "dashboard"
-                ? "bg-sky-500/20 text-sky-300 border border-sky-400/30 shadow-[0_0_15px_rgba(14,165,233,0.15)]"
-                : "text-gray-400 hover:text-gray-200 hover:bg-sky-500/5 border border-transparent"
-            }`}
-          >
-            <Layers className="w-4 h-4" />
-            <span>Central Core</span>
-          </button>
-          <button
-            onClick={() => setCurrentView("chat")}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl font-mono text-xs tracking-wider uppercase transition cursor-pointer shrink-0 ${
-              currentView === "chat"
-                ? "bg-sky-500/20 text-sky-300 border border-sky-400/30 shadow-[0_0_15px_rgba(14,165,233,0.15)]"
-                : "text-gray-400 hover:text-gray-200 hover:bg-sky-500/5 border border-transparent"
-            }`}
-          >
-            <MessageSquare className="w-4 h-4" />
-            <span>Dialogue Hub</span>
-          </button>
-          <button
-            onClick={() => setCurrentView("workspace")}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl font-mono text-xs tracking-wider uppercase transition cursor-pointer shrink-0 ${
-              currentView === "workspace"
-                ? "bg-sky-500/20 text-sky-300 border border-sky-400/30 shadow-[0_0_15px_rgba(14,165,233,0.15)]"
-                : "text-gray-400 hover:text-gray-200 hover:bg-sky-500/5 border border-transparent"
-            }`}
-          >
-            <Mail className="w-4 h-4" />
-            <span>Workspace Grid</span>
-          </button>
-          <button
-            onClick={() => setCurrentView("workshop")}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl font-mono text-xs tracking-wider uppercase transition cursor-pointer shrink-0 ${
-              currentView === "workshop"
-                ? "bg-sky-500/20 text-sky-300 border border-sky-400/30 shadow-[0_0_15px_rgba(14,165,233,0.15)]"
-                : "text-gray-400 hover:text-gray-200 hover:bg-sky-500/5 border border-transparent"
-            }`}
-          >
-            <ImageIcon className="w-4 h-4" />
-            <span>Image Workshop</span>
-          </button>
-          <button
-            onClick={() => setCurrentView("console")}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl font-mono text-xs tracking-wider uppercase transition cursor-pointer shrink-0 ${
-              currentView === "console"
-                ? "bg-sky-500/20 text-sky-300 border border-sky-400/30 shadow-[0_0_15px_rgba(14,165,233,0.15)]"
-                : "text-gray-400 hover:text-gray-200 hover:bg-sky-500/5 border border-transparent"
-            }`}
-          >
-            <Terminal className="w-4 h-4" />
-            <span>Tactical Scripts</span>
-          </button>
-          <button
-            onClick={() => setCurrentView("vault")}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl font-mono text-xs tracking-wider uppercase transition cursor-pointer shrink-0 ${
-              currentView === "vault"
-                ? "bg-sky-500/20 text-sky-300 border border-sky-400/30 shadow-[0_0_15px_rgba(14,165,233,0.15)]"
-                : "text-gray-400 hover:text-gray-200 hover:bg-sky-500/5 border border-transparent"
-            }`}
-          >
-            <CheckSquare className="w-4 h-4" />
-            <span>Keep Vault</span>
-          </button>
+      {/* Main Framework Grid - Unified Split Cockpit Dashboard */}
+      <div className="flex-1 grid grid-cols-1 xl:grid-cols-12 gap-6 p-6 relative z-10 max-h-[calc(100vh-73px)] h-[calc(100vh-73px)] overflow-hidden">
+
+        {/* Column 1: AI NEURAL CORE Orbit Visualizer (xl:col-span-7) */}
+        <div className="xl:col-span-7 flex flex-col h-full min-h-0">
+          <NeuralOrbitVisualizer 
+            onPlanetClick={(planet) => {
+              setInputMessage(planet.prompt);
+              setTerminalOutput(prev => [
+                ...prev,
+                `[SYS] Diagnostic connection established with node: ${planet.name}`,
+                `[SYS] Payload queued: "${planet.prompt}"`
+              ]);
+            }}
+            systemState={liveVoiceActive ? "LISTENING (VOICE ACTIVE)" : "SECURED & STANDBY"}
+          />
+        </div>
+
+        {/* Column 2: Dialogue & Telemetry Hub (xl:col-span-5) */}
+        <div className="xl:col-span-5 flex flex-col h-full min-h-0 border border-sky-500/15 bg-[#030713]/90 p-4 rounded-2xl shadow-2xl relative overflow-hidden backdrop-blur-lg">
           
-          <button
-            onClick={() => setCurrentView("webhooks")}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl font-mono text-xs tracking-wider uppercase transition cursor-pointer shrink-0 ${
-              currentView === "webhooks"
-                ? "bg-sky-500/20 text-sky-300 border border-sky-400/30 shadow-[0_0_15px_rgba(14,165,233,0.15)]"
-                : "text-gray-400 hover:text-gray-200 hover:bg-sky-500/5 border border-transparent"
-            }`}
-          >
-            <Activity className="w-4 h-4" />
-            <span>Webhooks</span>
-            {webhookEvents.length > 0 && (
-              <span className="ml-auto bg-sky-500 text-[#030816] text-[9px] font-bold px-1.5 py-0.5 rounded-full">
-                {webhookEvents.length}
-              </span>
-            )}
-          </button>
-
-          <button
-            onClick={() => setCurrentView("neural_sandbox")}
-            className={`flex items-center gap-3 px-4 py-3 rounded-xl font-mono text-xs tracking-wider uppercase transition cursor-pointer shrink-0 ${
-              currentView === "neural_sandbox"
-                ? "bg-emerald-500/10 text-emerald-600 border border-emerald-400/30 shadow-[0_0_15px_rgba(16,185,129,0.1)]"
-                : "text-gray-400 hover:text-gray-200 hover:bg-emerald-500/5 border border-transparent"
-            }`}
-          >
-            <Cpu className="w-4 h-4 text-emerald-600" />
-            <span>Neural Sandbox</span>
-          </button>
-
-          {isElectronApp && (
-            <div className="mt-4 mb-2 p-3 border border-sky-500/10 rounded-xl bg-sky-500/5">
-              <div className="text-[10px] font-mono text-sky-400 uppercase tracking-wide flex items-center gap-1.5 mb-1.5">
-                <RefreshCw className={`w-3.5 h-3.5 ${updateStatus.includes("Updating") || updateStatus.includes("Downloading") ? "animate-spin" : ""}`} />
-                Update Status
-              </div>
-              <div className="text-xs font-sans text-gray-300 break-words">{updateStatus}</div>
-            </div>
-          )}
-
-          {/* Quick Config widgets */}
-          <div className="hidden lg:flex flex-col gap-3 mt-auto p-3 border border-sky-500/10 rounded-xl bg-[#01050e]">
-            <div className="text-[10px] font-mono text-sky-400 uppercase tracking-wide">Tactical Controls</div>
-            
-            {/* Thinking level toggle */}
-            <label className="flex items-center justify-between text-xs font-mono text-gray-300 cursor-pointer select-none">
-              <span className="flex items-center gap-1"><Sparkles className="w-3.5 h-3.5 text-yellow-500" /> Deep Thinking</span>
-              <input 
-                type="checkbox" 
-                checked={thinkingMode} 
-                onChange={() => setThinkingMode(!thinkingMode)} 
-                className="rounded text-sky-500 focus:ring-sky-500 bg-gray-900 border-gray-700"
-              />
-            </label>
-
-            {/* Grounding dropdown */}
-            <div className="space-y-1">
-              <div className="text-[9px] font-mono text-gray-500 uppercase">Information Grounding</div>
-              <select
-                value={groundingMode}
-                onChange={(e: any) => setGroundingMode(e.target.value)}
-                className="w-full bg-gray-950 border border-sky-500/20 rounded px-2 py-1 text-[11px] font-mono text-sky-300"
-              >
-                <option value="none">None (Offline Core)</option>
-                <option value="search">Google Search</option>
-                <option value="maps">Google Maps API</option>
-              </select>
+          {/* Top Panel: Tabbed Telemetry & Diagnostics */}
+          <div className="flex flex-col border-b border-sky-500/10 pb-3 mb-3 shrink-0">
+            <div className="flex border border-sky-500/15 rounded-xl bg-gray-950/40 p-1 mb-3">
+              {[
+                { id: "telemetry", label: "Telemetry", icon: Cpu },
+                { id: "logs", label: "System Logs", icon: Terminal },
+                { id: "sensors", label: "Sensors Feed", icon: Activity }
+              ].map((tab) => {
+                const Icon = tab.icon;
+                const isSelected = rightPanelTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    onClick={() => setRightPanelTab(tab.id as any)}
+                    className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[10px] font-mono tracking-widest uppercase transition cursor-pointer ${
+                      isSelected 
+                        ? "bg-sky-500/10 text-sky-400 border border-sky-500/15" 
+                        : "text-gray-500 hover:text-gray-300 border border-transparent"
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5" />
+                    <span>{tab.label}</span>
+                  </button>
+                );
+              })}
             </div>
 
-            {/* Speech synthesis toggle */}
-            <label className="flex items-center justify-between text-xs font-mono text-gray-300 cursor-pointer select-none">
-              <span className="flex items-center gap-1">
-                {ttsEnabled ? <Volume2 className="w-3.5 h-3.5 text-green-400" /> : <VolumeX className="w-3.5 h-3.5 text-gray-500" />}
-                Speech Engine
-              </span>
-              <input 
-                type="checkbox" 
-                checked={ttsEnabled} 
-                onChange={() => setTtsEnabled(!ttsEnabled)} 
-                className="rounded text-sky-500 focus:ring-sky-500 bg-gray-900 border-gray-700"
-              />
-            </label>
+            {/* Tab Contents */}
+            <div className="max-h-[140px] overflow-y-auto pr-1">
+              {rightPanelTab === "telemetry" && (
+                <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                  <div className="p-2 border border-sky-500/5 bg-gray-950/30 rounded-lg flex items-center justify-between">
+                    <span className="text-gray-500">Core Temp:</span>
+                    <span className="text-green-400 font-bold">38°C (Stable)</span>
+                  </div>
+                  <div className="p-2 border border-sky-500/5 bg-gray-950/30 rounded-lg flex items-center justify-between">
+                    <span className="text-gray-500">Memory Load:</span>
+                    <span className="text-sky-400 font-bold">4.12 / 64 GB</span>
+                  </div>
+                  <div className="p-2 border border-sky-500/5 bg-gray-950/30 rounded-lg flex items-center justify-between">
+                    <span className="text-gray-500">Workspace Auth:</span>
+                    <span className="text-green-400 font-bold">ACTIVE</span>
+                  </div>
+                  <div className="p-2 border border-sky-500/5 bg-gray-950/30 rounded-lg flex items-center justify-between">
+                    <span className="text-gray-500">Voice Link:</span>
+                    <span className={liveVoiceActive ? "text-green-400 font-bold" : "text-gray-500"}>
+                      {liveVoiceActive ? "LISTENING" : "STANDBY"}
+                    </span>
+                  </div>
+                </div>
+              )}
 
-            {/* Prebuilt voices dropdown */}
-            {ttsEnabled && (
-              <div className="space-y-1">
-                <div className="text-[9px] font-mono text-gray-500 uppercase">Voice Matrix</div>
-                <select
-                  value={voiceSelected}
-                  onChange={(e: any) => setVoiceSelected(e.target.value)}
-                  className="w-full bg-gray-950 border border-sky-500/20 rounded px-2 py-1 text-[11px] font-mono text-sky-300"
-                >
-                  <option value="Zephyr">Zephyr (British Accent)</option>
-                  <option value="Kore">Kore (Clear Speaker)</option>
-                  <option value="Puck">Puck (Fast Dialogue)</option>
-                  <option value="Charon">Charon (Deep Core)</option>
-                  <option value="Fenrir">Fenrir (Heavy Bass)</option>
-                </select>
-              </div>
-            )}
+              {rightPanelTab === "logs" && (
+                <div className="space-y-1.5 font-mono text-[9px] text-left select-text bg-black/40 p-2 rounded-lg border border-sky-500/5 max-h-[140px] overflow-y-auto">
+                  {terminalOutput.slice(-8).map((log, i) => (
+                    <div key={i} className="text-gray-400 leading-relaxed truncate">
+                      <span className="text-sky-500">&gt;</span> {log}
+                    </div>
+                  ))}
+                  {dbLogs.length > 0 && (
+                    <div className="mt-2 border-t border-sky-500/10 pt-1.5 text-teal-400">
+                      &gt; [DB] SQL registry log synced. Records: {dbLogs.length}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {rightPanelTab === "sensors" && (
+                <div className="grid grid-cols-2 gap-2 text-[9px] font-mono text-left">
+                  <div className="flex items-center gap-1.5 text-gray-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+                    <span>Brand Guard Firewall: Active</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-gray-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+                    <span>SEO Tracker: Online</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-gray-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+                    <span>Amazon sync: Verified</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-gray-400">
+                    <span className={`w-1.5 h-1.5 rounded-full ${systemSettings.whatsAppLinkStatus === "connected" ? "bg-green-500" : "bg-gray-500"}`}></span>
+                    <span>WhatsApp Remote: {systemSettings.whatsAppLinkStatus === "connected" ? "Online" : "Off"}</span>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
-        </nav>
 
-        {/* Tactical Screen Stage */}
-        <main className="flex-1 overflow-y-auto p-6 relative">
-          
-          {/* Dynamic Grounding alerts */}
-          {groundingMode !== "none" && (
-            <div className="mb-4 bg-sky-950/40 border border-sky-500/30 px-4 py-2 rounded-xl text-xs flex items-center gap-2">
-              <Shield className="w-4 h-4 text-sky-400 animate-pulse" />
-              <span className="font-mono">
-                {groundingMode === "search" ? "Google Search Grounding enabled via models/gemini-3.5-flash." : "Google Maps retrieval online with local coordinate targeting."}
-              </span>
+          {/* Bottom Panel: Dialogue/Chat Thread */}
+          <div className="flex-1 flex flex-col min-h-0">
+            {/* Chat Messages Scrolling Thread */}
+            <div className="flex-1 overflow-y-auto mb-3 border border-sky-500/10 bg-[#030816]/75 p-3 rounded-xl space-y-3 scrollbar-thin">
+              {!systemSettings.geminiLiveApiKey && (
+                <div className="border border-yellow-500/20 bg-yellow-500/5 rounded-xl p-3 flex items-start gap-2.5 relative overflow-hidden backdrop-blur-sm">
+                  <div className="absolute top-0 left-0 w-1 h-full bg-yellow-500"></div>
+                  <Sparkles className="w-4 h-4 text-yellow-500 shrink-0 mt-0.5 animate-pulse" />
+                  <div className="flex-1 text-left">
+                    <div className="text-[10px] font-bold text-yellow-400 font-mono uppercase tracking-wider mb-0.5">⚠️ CENTRAL GRID WARNING (Shared Uplink Active)</div>
+                    <p className="text-[10px] text-gray-300 leading-normal font-sans">
+                      You are currently using a shared free API key. Please <button onClick={() => setShowSystemConfig(true)} className="text-yellow-400 font-bold underline hover:text-yellow-300 transition bg-transparent border-none p-0 cursor-pointer">open Settings and add your own Gemini API Key</button>.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {chatMessages.length === 0 && (
+                <div className="flex flex-col items-center justify-center h-full text-center p-4 text-gray-500 space-y-2">
+                  <div className="w-12 h-12 rounded-full border border-sky-500/20 flex items-center justify-center bg-[#070d1e]">
+                    <MessageSquare className="w-6 h-6 text-sky-400" />
+                  </div>
+                  <div>
+                    <p className="font-mono text-[10px] text-sky-400 uppercase tracking-widest">{assistantName.toUpperCase()} ONLINE</p>
+                    <p className="text-[11px] leading-relaxed max-w-xs font-sans">I am at your service, Sir. Type your command or click on any planetary node to execute diagnostics.</p>
+                  </div>
+                </div>
+              )}
+
+              {chatMessages.map((msg) => {
+                // Check if there are active intercepted actions inside this message
+                const actionsInMessage: any[] = [];
+                const actionRegex = /<action\s+type="([^"]+)"\s+([^>]+)\/?>/g;
+                let match;
+                while ((match = actionRegex.exec(msg.content)) !== null) {
+                  const type = match[1];
+                  const attrsRaw = match[2];
+                  const matchIndex = match.index;
+                  const actionId = `${msg.id}-${matchIndex}`;
+                  
+                  const attrs: Record<string, string> = {};
+                  const attrRegex = /(\w+)="([^"]+)"/g;
+                  let attrMatch;
+                  while ((attrMatch = attrRegex.exec(attrsRaw)) !== null) {
+                    attrs[attrMatch[1]] = attrMatch[2];
+                  }
+                  
+                  actionsInMessage.push({ id: actionId, type, attrs });
+                }
+
+                // Clean the visual text from XML action tags to keep the message extremely elegant
+                const cleanedContent = msg.content.replace(/<action\s+type="[^"]+"\s+[^>]+\/?>/g, "").trim();
+
+                return (
+                  <div 
+                    key={msg.id} 
+                    className={`flex gap-2.5 max-w-full ${msg.role === "user" ? "ml-auto flex-row-reverse text-right" : "mr-auto text-left"}`}
+                  >
+                    <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 border ${
+                      msg.role === "user" ? "border-sky-500/40 bg-sky-950" : "border-teal-500/40 bg-teal-950"
+                    }`}>
+                      {msg.role === "user" ? <UserIcon className="w-3.5 h-3.5 text-sky-300" /> : <Cpu className="w-3.5 h-3.5 text-teal-300" />}
+                    </div>
+                    <div className={`rounded-xl p-3 space-y-1.5 select-text max-w-[85%] ${
+                      msg.role === "user" 
+                        ? "bg-sky-500/10 border border-sky-500/15 text-gray-100" 
+                        : "bg-teal-950/15 border border-teal-500/20 text-gray-100"
+                    }`}>
+                      {msg.inlineData && (
+                        <div className="mb-2 max-w-xs border border-sky-500/20 rounded-lg overflow-hidden">
+                          <img src={`data:${msg.inlineData.mimeType};base64,${msg.inlineData.data}`} alt="schematic attachment" className="w-full" />
+                        </div>
+                      )}
+                      
+                      <div className="text-[11px] font-sans whitespace-pre-wrap leading-relaxed select-text">
+                        {cleanedContent}
+                      </div>
+
+                      {/* Render Intercepted Action Status directly in bubble */}
+                      {actionsInMessage.map((act) => {
+                        const statusState = processingActions[act.id] || { status: "idle" };
+                        return (
+                          <div key={act.id} className="mt-2 border border-sky-500/20 bg-gray-950 p-2 rounded-lg text-[9px] text-left font-mono space-y-1">
+                            <div className="flex items-center justify-between border-b border-sky-500/10 pb-1 flex-row">
+                              <div className="flex items-center gap-1.5 text-sky-400 font-bold">
+                                <Sparkles className="w-3 h-3 animate-pulse" />
+                                <span>[ACTION EXECUTOR]</span>
+                              </div>
+                              <span className={`px-1.5 py-0.2 rounded text-[7px] uppercase ${
+                                statusState.status === "running" ? "bg-yellow-500/10 text-yellow-400 animate-pulse" :
+                                statusState.status === "success" ? "bg-green-500/10 text-green-400" :
+                                statusState.status === "failed" ? "bg-red-500/10 text-red-400" : "bg-gray-800 text-gray-400"
+                              }`}>
+                                ● {statusState.status}
+                              </span>
+                            </div>
+                            <div className="text-gray-400 text-[8px]">
+                              ACTION: {act.type.toUpperCase()} ({Object.keys(act.attrs).map(k => `${k}=${act.attrs[k]}`).join(", ")})
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+              {isGenerating && (
+                <div className="flex gap-2.5 mr-auto text-left items-center">
+                  <div className="w-7 h-7 rounded-full border border-teal-500/40 bg-teal-950 flex items-center justify-center animate-spin">
+                    <Cpu className="w-3.5 h-3.5 text-teal-300" />
+                  </div>
+                  <div className="text-[10px] font-mono text-teal-400 animate-pulse">{assistantName} is processing sequence...</div>
+                </div>
+              )}
+              <div ref={messageEndRef}></div>
             </div>
-          )}
 
-          {/* ----------------- CORE VIEW 1: CENTRAL HOLOGRAPHIC DIAGNOSTICS ----------------- */}
+            {/* Chat Inputs & Triggers */}
+            <div className="bg-[#030816] border border-sky-500/15 p-3 rounded-xl space-y-2 shrink-0">
+              {uploadImageBase64 && (
+                <div className="flex items-center gap-2 p-1.5 border border-sky-500/15 bg-gray-950 rounded-lg max-w-xs relative text-left">
+                  <img src={`data:${uploadImageMime};base64,${uploadImageBase64}`} alt="preview" className="w-10 h-10 rounded object-cover" />
+                  <div className="truncate flex-1">
+                    <div className="text-[10px] font-semibold text-gray-200">Attachment Ready</div>
+                    <div className="text-[8px] text-sky-400">Analysis queued</div>
+                  </div>
+                  <button 
+                    onClick={() => { setUploadImageBase64(null); setUploadImageMime(null); }}
+                    className="p-1 text-red-400 hover:text-red-500 rounded bg-red-500/10 border border-transparent hover:border-red-500/20 cursor-pointer"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+              )}
+
+              <div className="flex gap-2 items-center">
+                {/* Voice transcription button */}
+                <button
+                  onClick={isRecording ? stopRecording : startRecording}
+                  className={`p-2.5 rounded-lg border transition cursor-pointer flex items-center justify-center shrink-0 ${
+                    isRecording 
+                      ? "bg-red-500/20 border-red-500 text-red-400 animate-pulse" 
+                      : "bg-sky-500/10 border-sky-500/20 text-sky-400 hover:bg-sky-500/20"
+                  }`}
+                  title={isRecording ? "Stop Speech Input" : "Transcribe Voice Input"}
+                >
+                  {isRecording ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                </button>
+
+                <input
+                  type="text"
+                  value={inputMessage}
+                  onChange={(e) => setInputMessage(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
+                  placeholder="Initiate command sequence..."
+                  className="flex-1 bg-gray-950 border border-sky-500/15 rounded-lg px-3 py-2.5 text-xs text-gray-100 focus:outline-none focus:border-sky-400/40 font-mono"
+                />
+
+                {/* File Attachment */}
+                <label className="p-2.5 bg-sky-500/10 border border-sky-500/20 text-sky-400 hover:bg-sky-500/20 rounded-lg transition cursor-pointer shrink-0">
+                  <ImageIcon className="w-4 h-4" />
+                  <input 
+                    type="file" 
+                    accept="image/*" 
+                    onChange={handleImageUploadChange} 
+                    className="hidden" 
+                  />
+                </label>
+
+                {/* Send */}
+                <button
+                  onClick={() => handleSendMessage()}
+                  className="p-2.5 bg-sky-500 hover:bg-sky-600 text-white rounded-lg transition cursor-pointer shrink-0 shadow-lg"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+          </div>
+
+        </div>
+
+        {/* Deactivated Legacy Layout Block Wrapper */}
+        <div className="hidden">
           {currentView === "dashboard" && (
             <div className="space-y-6">
               {/* Massive Hologram Diagnosis Card */}
@@ -4224,14 +4334,8 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
             </div>
           )}
 
-          {currentView === "neural_sandbox" && (
-            <NeuralSandbox 
-              userApiKey={systemSettings.geminiLiveApiKey || ""} 
-              preferredModel={preferredModel} 
-            />
-          )}
-
-        </main>
+          </div>
+        {/* </main> Closed in split cockpit */}
       </div>
 
       {/* ----------------- SUB-COMPONENTS: VOICE STREAMING CONVERSATION DRAWER ----------------- */}
@@ -4371,6 +4475,32 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
         settings={systemSettings}
         userEmail={user?.email || ""}
         onSave={saveSystemSettings}
+        emails={emails}
+        events={events}
+        taskLists={taskLists}
+        selectedTaskList={selectedTaskList}
+        tasks={tasks}
+        meetSpaces={meetSpaces}
+        chatSpaces={chatSpaces}
+        selectedChatSpace={selectedChatSpace}
+        chatMessagesList={chatMessagesList}
+        workspaceLoading={workspaceLoading}
+        workspaceError={workspaceError}
+        onSelectTaskList={(id) => { setSelectedTaskList(id); if (token) fetchGoogleTasks(token, id); }}
+        onSelectChatSpace={(id) => { setSelectedChatSpace(id); if (token) fetchChatMessages(token, id); }}
+        onTriggerConfirmation={triggerConfirmation}
+        notes={notes}
+        newNote={newNote}
+        onSetNewNote={setNewNote}
+        onAddNote={handleSaveNote}
+        onDeleteNote={handleDeleteNote}
+        loadingNotes={loadingNotes}
+        scripts={scripts}
+        onAddScript={handleSaveScript}
+        onDeleteScript={handleDeleteScript}
+        onRunScriptSimulate={handleRunScriptSimulate}
+        webhookEvents={webhookEvents}
+        onClearWebhookEvents={() => setWebhookEvents([])}
       />
 
       <OnboardingModal

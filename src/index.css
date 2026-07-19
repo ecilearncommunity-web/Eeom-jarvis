@@ -178,4 +178,14 @@ nav button {
   border-color: #ccfbf1 !important; /* light teal border */
 }
 
+@keyframes orbit-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+
 
