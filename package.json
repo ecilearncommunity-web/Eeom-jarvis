@@ -2,7 +2,7 @@
   "name": "react-example",
   "private": true,
   "version": "0.0.0",
-  "main": "electron-main.js",
+  "main": "electron-main.cjs",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -10,7 +10,7 @@
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "build:exe": "electron-builder --win -c.extraMetadata.main=electron-main.js"
+    "build:exe": "electron-builder --win"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -53,7 +53,7 @@
     },
     "files": [
       "dist/**/*",
-      "electron-main.js",
+      "electron-main.cjs",
       "package.json"
     ],
     "win": {

@@ -39,6 +39,7 @@ import {
 } from "./types";
 import SystemConfigModal from "./components/SystemConfigModal";
 import OnboardingModal from "./components/OnboardingModal";
+import { CyberdeckLogo } from "./components/CyberdeckLogo";
 import { 
   Terminal, 
   MessageSquare, 
@@ -2103,18 +2104,9 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
         <div className="absolute w-[400px] h-[400px] bg-sky-500/10 rounded-full blur-[100px] pointer-events-none"></div>
 
         <div className="max-w-md w-full border border-sky-500/20 bg-[#070d1e]/80 p-8 rounded-2xl shadow-2xl relative z-10 text-center backdrop-blur-xl">
-          {/* Futuristic Arc Reactor */}
-          <div className="w-24 h-24 rounded-full border-[3px] border-sky-400/30 flex items-center justify-center mx-auto mb-6 relative arc-pulse shadow-[0_0_20px_rgba(56,189,248,0.2)]">
-            <div className="w-16 h-16 rounded-full border-[2px] border-dashed border-sky-300/40 flex items-center justify-center">
-              <div className="w-10 h-10 rounded-full bg-sky-500/30 border border-sky-300 flex items-center justify-center animate-pulse">
-                <Cpu className="w-5 h-5 text-sky-300" />
-              </div>
-            </div>
-            {/* Triangular panels around reactor */}
-            <div className="absolute top-1 left-1/2 -translate-x-1/2 w-1.5 h-1.5 bg-sky-400 rounded-full"></div>
-            <div className="absolute bottom-1 left-1/2 -translate-x-1/2 w-1.5 h-1.5 bg-sky-400 rounded-full"></div>
-            <div className="absolute left-1 top-1/2 -translate-y-1/2 w-1.5 h-1.5 bg-sky-400 rounded-full"></div>
-            <div className="absolute right-1 top-1/2 -translate-y-1/2 w-1.5 h-1.5 bg-sky-400 rounded-full"></div>
+          {/* Cyberdeck Logo */}
+          <div className="mb-6 flex justify-center">
+            <CyberdeckLogo className="w-24 h-24 drop-shadow-[0_0_15px_rgba(16,185,129,0.3)]" />
           </div>
 
           <h1 className="jarvis-heading text-3xl font-bold tracking-wider text-sky-400 mb-2 uppercase">
@@ -2194,12 +2186,8 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
       {/* Floating Header */}
       <header className="border-b border-sky-500/20 bg-[#04091a]/95 px-6 py-4 flex items-center justify-between relative z-10 backdrop-blur-md">
         <div className="flex items-center gap-3">
-          {/* Animated Reactor Mini */}
-          <div className="w-10 h-10 rounded-full border-2 border-sky-400/40 flex items-center justify-center relative shadow-[0_0_10px_rgba(56,189,248,0.2)]">
-            <div className="w-6 h-6 rounded-full border border-dashed border-sky-300 flex items-center justify-center">
-              <div className="w-3 h-3 rounded-full bg-sky-500"></div>
-            </div>
-          </div>
+          {/* Cyberdeck Logo */}
+          <CyberdeckLogo className="w-10 h-10 drop-shadow-[0_0_8px_rgba(16,185,129,0.4)]" />
           <div>
             <h1 className="jarvis-heading font-bold text-lg tracking-wider text-sky-400">J.A.R.V.I.S.</h1>
             <div className="text-[10px] text-gray-400 font-mono flex items-center gap-1">
