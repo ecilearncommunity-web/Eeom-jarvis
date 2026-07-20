@@ -989,10 +989,19 @@ wss.on("connection", async (clientWs, request) => {
               },
               callbacks: {
                 onmessage: async (message) => {
+                  const msg = message as any;
                   let audio = null;
                   let text = "";
-                  if (message.serverContent?.modelTurn?.parts) {
-                    for (const part of message.serverContent.modelTurn.parts) {
+                  let userText = "";
+                  if (msg.serverContent?.userTurn?.parts) {
+                    for (const part of msg.serverContent.userTurn.parts) {
+                      if (part.text) {
+                        userText += part.text;
+                      }
+                    }
+                  }
+                  if (msg.serverContent?.modelTurn?.parts) {
+                    for (const part of msg.serverContent.modelTurn.parts) {
                       if (part.inlineData?.data) {
                         audio = part.inlineData.data;
                       }
@@ -1000,6 +1009,10 @@ wss.on("connection", async (clientWs, request) => {
                         text += part.text;
                       }
                     }
+                  }
+
+                  if (userText) {
+                    clientWs.send(JSON.stringify({ type: "userText", text: userText }));
                   }
 
                   if (message.toolCall) {
@@ -1109,10 +1122,19 @@ wss.on("connection", async (clientWs, request) => {
                 },
                 callbacks: {
                   onmessage: (message) => {
+                    const msg = message as any;
                     let audio = null;
                     let text = "";
-                    if (message.serverContent?.modelTurn?.parts) {
-                      for (const part of message.serverContent.modelTurn.parts) {
+                    let userText = "";
+                    if (msg.serverContent?.userTurn?.parts) {
+                      for (const part of msg.serverContent.userTurn.parts) {
+                        if (part.text) {
+                          userText += part.text;
+                        }
+                      }
+                    }
+                    if (msg.serverContent?.modelTurn?.parts) {
+                      for (const part of msg.serverContent.modelTurn.parts) {
                         if (part.inlineData?.data) {
                           audio = part.inlineData.data;
                         }
@@ -1120,6 +1142,10 @@ wss.on("connection", async (clientWs, request) => {
                           text += part.text;
                         }
                       }
+                    }
+
+                    if (userText) {
+                      clientWs.send(JSON.stringify({ type: "userText", text: userText }));
                     }
 
                     if (message.toolCall) {

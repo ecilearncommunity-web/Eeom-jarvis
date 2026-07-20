@@ -277,6 +277,22 @@ export default function App() {
   const [webhookEvents, setWebhookEvents] = useState<WebhookEvent[]>([]);
   const [showWebhookToast, setShowWebhookToast] = useState<{show: boolean, name: string}>({show: false, name: ""});
 
+  // System-wide API error toast notification
+  const [apiErrorToast, setApiErrorToast] = useState<{show: boolean, title: string, message: string} | null>(null);
+
+  const showApiError = (title: string, message: string) => {
+    setApiErrorToast({ show: true, title, message });
+    // Keep toast visible for 15 seconds to give the user plenty of time to read key information / instructions
+    setTimeout(() => {
+      setApiErrorToast(prev => {
+        if (prev && prev.title === title && prev.message === message) {
+          return { ...prev, show: false };
+        }
+        return prev;
+      });
+    }, 15000);
+  };
+
   const fetchSystemSettings = async (userId: string) => {
     // Check if client is offline or navigator indicates offline status
     const isOffline = typeof navigator !== "undefined" && !navigator.onLine;
@@ -470,6 +486,8 @@ Make sure to explain what you are doing matching your selected personality templ
   const mediaPlaceholderRef = useRef<HTMLDivElement | null>(null);
   const liveAssistantTextBufferRef = useRef<string>("");
   const lastChunkTimeRef = useRef<number>(0);
+  const liveMessageIdRef = useRef<string | null>(null);
+  const lastUserTranscriptRef = useRef<string>("");
   const systemSettingsRef = useRef(systemSettings);
 
   useEffect(() => {
@@ -1382,6 +1400,7 @@ Make sure to explain what you are doing matching your selected personality templ
 
     } catch (err: any) {
       console.error("Jarvis Chat error:", err);
+      showApiError("Central Core Connection Failed", err.message || "Unknown error connecting to Gemini Chat API.");
       const isQuota = (err.message || "").toLowerCase().includes("quota") || 
                       (err.message || "").toLowerCase().includes("exhausted") || 
                       (err.message || "").toLowerCase().includes("429") || 
@@ -1498,8 +1517,9 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
       if (data.text) {
         setInputMessage(data.text);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Audio Transcription Failed:", err);
+      showApiError("Audio Transcription Failed", err.message || "Unknown error transcribing microphone input.");
     } finally {
       setIsGenerating(false);
     }
@@ -1586,6 +1606,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
     setLiveSessionError(null);
     liveAssistantTextBufferRef.current = ""; // Reset buffer at session start
     setLiveTextTranscript(["Initializing real-time audio bridge...", "Status: Dialing central server..."]);
+    setTerminalOutput(prev => [...prev, "[VOICE] Initializing real-time voice audio bridge...", "[VOICE] Requesting microphone permission & dialing central uplink..."]);
     setLiveWsStatus("connecting");
 
     // Initialize Audio Contexts synchronously on user click to bypass browser autoplay policies
@@ -1627,6 +1648,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           setLiveWsStatus("connected");
           setLiveVoiceActive(true);
           setLiveTextTranscript(prev => [...prev, "Status: Core Uplink Established. Ready to speak, Boss."]);
+          setTerminalOutput(prev => [...prev, "[VOICE] Core Uplink Established successfully! Jarvis is listening to your microphone..."]);
 
           // Start capturing mic at 16kHz PCM
           try {
@@ -1653,6 +1675,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           } catch (err) {
             console.error("Mic stream setup failure for Live session:", err);
             setLiveTextTranscript(prev => [...prev, "Hardware error: Microphone capture failed."]);
+            setTerminalOutput(prev => [...prev, "[ERROR] Microphone initialization failed. Please allow microphone access!"]);
           }
         }
         if (payload.type === "audio" && payload.audio) {
@@ -1687,11 +1710,31 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
             }
           }
         }
+        if (payload.type === "userText" && payload.text) {
+          const userStr = payload.text.trim();
+          if (userStr && userStr !== lastUserTranscriptRef.current) {
+            lastUserTranscriptRef.current = userStr;
+            const newUserMsg: Message = {
+              id: `live-user-${Date.now()}-${Math.random()}`,
+              role: "user",
+              content: userStr,
+              timestamp: new Date()
+            };
+            setChatMessages(prev => [...prev, newUserMsg]);
+            setLiveTextTranscript(prev => [...prev, `User: ${userStr}`]);
+            setTerminalOutput(prev => [...prev, `[USER] ${userStr}`]);
+            
+            // Start a new utterance response message ID
+            liveMessageIdRef.current = `live-ai-${Date.now()}-${Math.random()}`;
+            liveAssistantTextBufferRef.current = "";
+          }
+        }
         if (payload.type === "text" && payload.text) {
           const now = Date.now();
           // Reset buffer if there has been more than 4000ms of silence (new utterance)
-          if (now - lastChunkTimeRef.current > 4000) {
+          if (now - lastChunkTimeRef.current > 4000 || !liveMessageIdRef.current) {
             liveAssistantTextBufferRef.current = "";
+            liveMessageIdRef.current = `live-ai-${Date.now()}-${Math.random()}`;
           }
           lastChunkTimeRef.current = now;
 
@@ -1708,6 +1751,30 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
               copy.push(`Jarvis: ${liveAssistantTextBufferRef.current}`);
             }
             return copy;
+          });
+
+          // Stream directly inside chatMessages!
+          setChatMessages(prev => {
+            const exists = prev.some(m => m.id === liveMessageIdRef.current);
+            if (exists) {
+              return prev.map(m => {
+                if (m.id === liveMessageIdRef.current) {
+                  return { ...m, content: liveAssistantTextBufferRef.current };
+                }
+                return m;
+              });
+            } else {
+              return [
+                ...prev,
+                {
+                  id: liveMessageIdRef.current!,
+                  role: "assistant",
+                  content: liveAssistantTextBufferRef.current,
+                  timestamp: new Date(),
+                  modelUsed: "gemini-3.1-flash-live-preview"
+                }
+              ];
+            }
           });
 
           // Check for complete action tags inside the accumulated buffer
@@ -1742,16 +1809,39 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
               }
               return copy;
             });
+
+            // Update in chatMessages as well
+            setChatMessages(prev => prev.map(m => {
+              if (m.id === liveMessageIdRef.current) {
+                return { ...m, content: liveAssistantTextBufferRef.current.trim() };
+              }
+              return m;
+            }));
           }
         }
         if (payload.type === "interrupted") {
           if (livePlayerRef.current) livePlayerRef.current.stop();
           liveAssistantTextBufferRef.current = "";
           setLiveTextTranscript(prev => [...prev, "[ALERT]: Transcription Interrupted."]);
+          setTerminalOutput(prev => [...prev, "[VOICE] Response generation interrupted."]);
         }
         if (payload.type === "error") {
           setLiveTextTranscript(prev => [...prev, `[ERROR]: ${payload.message}`]);
           setLiveSessionError(payload.message);
+          setTerminalOutput(prev => [...prev, `[ERROR] ${payload.message}`]);
+          showApiError("Gemini Live Link Failure", payload.message || "Uplink connection failed.");
+
+          // Stream error directly to the chat messages list for visibility!
+          const errorMsgId = `live-error-${Date.now()}`;
+          setChatMessages(prev => [
+            ...prev,
+            {
+              id: errorMsgId,
+              role: "assistant",
+              content: payload.message,
+              timestamp: new Date()
+            }
+          ]);
         }
       };
 
@@ -1763,13 +1853,17 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
 
       ws.onerror = (err) => {
         console.error("Live Web socket error:", err);
-        setLiveSessionError(prev => prev || "Failed to establish real-time socket link with local server.");
+        const errMsg = "Failed to establish real-time socket link with local server. Please check your network connection or backend state.";
+        setLiveSessionError(errMsg);
+        showApiError("Uplink Connection Failed", errMsg);
       };
 
     } catch (err: any) {
       console.error("Live Web socket setup failed:", err);
       setLiveWsStatus("disconnected");
-      setLiveSessionError(err?.message || "Failed to establish real-time socket link with local server.");
+      const errMsg = err?.message || "Failed to establish real-time socket link with local server.";
+      setLiveSessionError(errMsg);
+      showApiError("Voice Initialization Error", errMsg);
     }
   };
 
@@ -1797,7 +1891,10 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
     setLiveWsStatus("disconnected");
     setLiveSessionError(null);
     cleanupAudioResources();
+    liveMessageIdRef.current = null;
+    lastUserTranscriptRef.current = "";
     setLiveTextTranscript(prev => [...prev, "Real-time audio bridge offline."]);
+    setTerminalOutput(prev => [...prev, "[VOICE] Voice uplink connection severed. Returning to standby..."]);
   };
 
   // 8. Workspace Operation Executers (Confirmations included!)
@@ -2010,7 +2107,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
       setTerminalOutput(prev => [...prev, `[WORKSHOP] Rendered holographic image. Dimension: ${imageSize}, Aspect: ${imageAspectRatio}.`]);
     } catch (err: any) {
       console.error("Rendering failure:", err);
-      alert(`Image Generation Failed: ${err.message}`);
+      showApiError("Image Generation Failed", err.message || "Unknown error rendering holographic asset.");
     } finally {
       setImageWorkshopLoading(false);
     }
@@ -2091,8 +2188,9 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
         }]);
         if (ttsEnabled) speakResponse("Schematics analyzed, Boss. Diagnostic readouts are in our chat logs.");
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Vision Analysis error:", err);
+      showApiError("Vision Analysis Failed", err.message || "Unknown error analyzing image schematics.");
     } finally {
       setIsGenerating(false);
     }
@@ -2223,6 +2321,36 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
             )}
           </div>
 
+          {/* Real-time Voice Chat Link Button */}
+          <button
+            id="start-voice-assistant-btn"
+            onClick={(liveVoiceActive || liveWsStatus === "connecting") ? stopLiveVoiceSession : startLiveVoiceSession}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl font-orbitron text-[10px] font-black uppercase transition-all duration-300 cursor-pointer border ${
+              liveWsStatus === "connecting"
+                ? "bg-amber-500/20 border-amber-500/50 text-amber-400 animate-pulse shadow-[0_0_15px_rgba(245,158,11,0.25)] scale-[1.02]"
+                : liveWsStatus === "connected"
+                  ? "bg-rose-500/20 hover:bg-rose-500/35 border-rose-500/50 text-rose-400 shadow-[0_0_18px_rgba(244,63,94,0.35)]"
+                  : "bg-emerald-500/15 hover:bg-emerald-500/30 border-emerald-500/30 hover:border-emerald-500 text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.15)] hover:shadow-[0_0_20px_rgba(16,185,129,0.35)]"
+            }`}
+            title={liveWsStatus === "connected" ? "ভয়েস কানেকশন বন্ধ করুন (Disconnect Voice)" : "ভয়েস অ্যাসিস্ট্যান্ট শুরু করুন (Start Voice Assistant)"}
+          >
+            {liveWsStatus === "connecting" ? (
+              <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
+            ) : liveWsStatus === "connected" ? (
+              <Mic className="w-4 h-4 text-rose-400 animate-bounce" />
+            ) : (
+              <Mic className="w-4 h-4 text-emerald-400 animate-pulse" />
+            )}
+            <span>
+              {liveWsStatus === "connecting" 
+                ? "CONNECTING... / সংযোগ হচ্ছে"
+                : liveWsStatus === "connected" 
+                  ? "STOP VOICE / ভয়েস বন্ধ" 
+                  : "START VOICE / ভয়েস শুরু"
+              }
+            </span>
+          </button>
+
           {/* User Bio */}
           <div className="flex items-center gap-3">
             <img 
@@ -2267,7 +2395,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
                 `[SYS] Payload queued: "${planet.prompt}"`
               ]);
             }}
-            systemState={liveVoiceActive ? "LISTENING (VOICE ACTIVE)" : "SECURED & STANDBY"}
+            systemState={liveWsStatus === "connecting" ? "DOCKING VOICE LINK..." : liveVoiceActive ? "LISTENING (VOICE ACTIVE)" : "SECURED & STANDBY"}
             userId={user?.uid}
             emailsCount={emails.length}
             eventsCount={events.length}
@@ -2324,8 +2452,8 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
                   </div>
                   <div className="p-2 border border-sky-500/5 bg-gray-950/30 rounded-lg flex items-center justify-between">
                     <span className="text-gray-500">Voice Link:</span>
-                    <span className={liveVoiceActive ? "text-green-400 font-bold" : "text-gray-500"}>
-                      {liveVoiceActive ? "LISTENING" : "STANDBY"}
+                    <span className={liveWsStatus === "connecting" ? "text-yellow-400 font-bold animate-pulse" : liveVoiceActive ? "text-green-400 font-bold" : "text-gray-500"}>
+                      {liveWsStatus === "connecting" ? "CONNECTING" : liveVoiceActive ? "LISTENING" : "STANDBY"}
                     </span>
                   </div>
                 </div>
@@ -4351,74 +4479,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
         {/* </main> Closed in split cockpit */}
       </div>
 
-      {/* ----------------- SUB-COMPONENTS: VOICE STREAMING CONVERSATION DRAWER ----------------- */}
-      {(liveVoiceActive || liveWsStatus === "connecting" || liveSessionError) && (
-        <div className="fixed inset-0 bg-[#02050c]/85 backdrop-blur-md flex items-center justify-center z-50 p-4">
-          <div className={`max-w-md w-full border ${liveSessionError ? 'border-red-500/40 bg-[#120404]/95 shadow-[0_0_30px_rgba(239,68,68,0.2)]' : 'border-teal-500/30 bg-[#041224]/95'} p-6 rounded-2xl shadow-2xl text-center relative overflow-hidden transition-all duration-300`}>
-            <div className={`absolute top-0 left-0 w-full h-1 bg-gradient-to-r ${liveSessionError ? 'from-red-500 to-amber-500' : 'from-teal-500 to-sky-500'} ${liveWsStatus === "connecting" ? 'animate-pulse' : ''}`}></div>
-            
-            {/* Pulsing visual core */}
-            <div className={`w-32 h-32 rounded-full border-[3px] ${liveSessionError ? 'border-red-500/40 shadow-[0_0_20px_rgba(239,68,68,0.2)]' : liveWsStatus === "connecting" ? 'border-yellow-500/40 shadow-[0_0_20px_rgba(234,179,8,0.2)]' : 'border-teal-400/40 shadow-[0_0_30px_rgba(20,184,166,0.3)]'} flex items-center justify-center mx-auto mb-6 relative ${!liveSessionError ? 'arc-pulse' : ''}`}>
-              <div className="w-24 h-24 rounded-full border-[2px] border-dashed border-sky-300/40 flex items-center justify-center">
-                <div className={`w-16 h-16 rounded-full ${liveSessionError ? 'bg-red-500/20 border border-red-500' : liveWsStatus === "connecting" ? 'bg-yellow-500/20 border border-yellow-500 animate-pulse' : 'bg-teal-500/30 border border-teal-300 animate-pulse'} flex items-center justify-center`}>
-                  {liveSessionError ? (
-                    <AlertCircle className="w-8 h-8 text-red-400" />
-                  ) : liveWsStatus === "connecting" ? (
-                    <Loader2 className="w-8 h-8 text-yellow-400 animate-spin" />
-                  ) : (
-                    <Mic className="w-8 h-8 text-teal-300" />
-                  )}
-                </div>
-              </div>
-            </div>
 
-            {liveSessionError ? (
-              <>
-                <h3 className="jarvis-heading text-xl font-bold tracking-wider text-red-400 uppercase mb-1">UPLINK FAILURE</h3>
-                <p className="text-[10px] font-mono text-gray-400 mb-4 uppercase flex items-center justify-center gap-1.5">
-                  <span className="w-2 h-2 bg-red-500 rounded-full animate-ping"></span>
-                  <span>Grid Status: Offline / Error</span>
-                </p>
-                <div className="mb-4 text-xs text-red-300 bg-red-950/40 border border-red-900/50 rounded-xl p-4 text-left leading-relaxed font-mono">
-                  {liveSessionError}
-                </div>
-              </>
-            ) : liveWsStatus === "connecting" ? (
-              <>
-                <h3 className="jarvis-heading text-xl font-bold tracking-wider text-yellow-400 uppercase mb-1">ESTABLISHING UPLINK</h3>
-                <p className="text-[10px] font-mono text-gray-400 mb-6 uppercase flex items-center justify-center gap-1.5">
-                  <span className="w-2 h-2 bg-yellow-500 rounded-full animate-ping"></span>
-                  <span>Model: models/gemini-3.1-flash-live-preview</span>
-                </p>
-              </>
-            ) : (
-              <>
-                <h3 className="jarvis-heading text-xl font-bold tracking-wider text-teal-400 uppercase mb-1">LIVE VOICE BRIDGE</h3>
-                <p className="text-[10px] font-mono text-gray-400 mb-6 uppercase flex items-center justify-center gap-1.5">
-                  <span className="w-2 h-2 bg-green-500 rounded-full animate-ping"></span>
-                  <span>Model: models/gemini-3.1-flash-live-preview</span>
-                </p>
-              </>
-            )}
-
-            {/* Real-time speech transcript log */}
-            <div className="border border-teal-500/15 bg-gray-950 p-4 rounded-xl font-mono text-xs text-left text-gray-300 space-y-2 h-44 overflow-y-auto mb-6 scrollbar-thin">
-              {liveTextTranscript.map((line, idx) => (
-                <div key={idx} className="leading-relaxed">
-                  <span className={liveSessionError && line.includes("[ERROR]") ? "text-red-400" : "text-teal-400"}>&gt;&gt; </span>{line}
-                </div>
-              ))}
-            </div>
-
-            <button
-              onClick={stopLiveVoiceSession}
-              className={`px-6 py-2.5 ${liveSessionError ? 'bg-gray-500/10 hover:bg-gray-500/25 border border-gray-500/30 text-gray-300' : 'bg-red-500/20 hover:bg-red-500/35 border border-red-500/30 text-red-400'} font-mono text-xs uppercase rounded-xl transition cursor-pointer`}
-            >
-              {liveSessionError ? 'Dismiss Diagnostics' : liveWsStatus === "connecting" ? 'Abort Uplink Attempt' : '🔒 Sever Uplink Connection'}
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* ----------------- SUB-COMPONENTS: WEBHOOK TOAST ----------------- */}
       <div className={`fixed top-4 right-4 z-50 transition-all duration-500 transform ${showWebhookToast.show ? "translate-y-0 opacity-100" : "-translate-y-full opacity-0 pointer-events-none"}`}>
@@ -4432,6 +4493,28 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           </div>
         </div>
       </div>
+
+      {/* ----------------- SUB-COMPONENTS: SYSTEM API ERROR TOAST ----------------- */}
+      {apiErrorToast && apiErrorToast.show && (
+        <div className="fixed top-6 right-6 z-[60] max-w-md w-[90%] bg-red-950/90 border-2 border-red-500/50 rounded-2xl p-4 shadow-[0_0_25px_rgba(239,68,68,0.25)] backdrop-blur-md animate-fade-in text-left">
+          <div className="flex items-start gap-3">
+            <div className="w-8 h-8 rounded-full bg-red-500/20 border border-red-500/50 flex items-center justify-center shrink-0">
+              <AlertCircle className="w-4 h-4 text-red-400 animate-pulse" />
+            </div>
+            <div className="flex-1 min-w-0 font-sans">
+              <div className="text-[10px] font-bold text-red-400 uppercase tracking-wider font-orbitron">SYSTEM LINK FAILURE</div>
+              <h4 className="text-xs font-bold text-white mt-0.5 tracking-wide leading-tight">{apiErrorToast.title}</h4>
+              <p className="text-[11px] text-red-200 mt-1 font-mono leading-relaxed whitespace-pre-line">{apiErrorToast.message}</p>
+            </div>
+            <button
+              onClick={() => setApiErrorToast(prev => prev ? { ...prev, show: false } : null)}
+              className="text-red-400/60 hover:text-red-400 transition cursor-pointer shrink-0 font-mono text-[10px] font-bold uppercase hover:bg-red-500/10 px-2 py-1 rounded"
+            >
+              CLOSE
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ----------------- SUB-COMPONENTS: ACTION CONFIRMATION MODAL (MANDATORY) ----------------- */}
       {pendingAction && (
