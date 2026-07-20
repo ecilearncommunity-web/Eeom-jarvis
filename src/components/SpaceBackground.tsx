@@ -20,6 +20,9 @@ export default function SpaceBackground() {
       alpha: number;
       twinkleSpeed: number;
       baseAlpha: number;
+      color: string;
+      isShiningFlare?: boolean;
+      flareSize?: number;
     }
 
     interface ShootingStar {
@@ -36,6 +39,14 @@ export default function SpaceBackground() {
     let stars: Star[] = [];
     let shootingStars: ShootingStar[] = [];
 
+    const starColors = [
+      "rgba(255, 255, 255,", // Pure white
+      "rgba(103, 232, 249,", // Bright cyan
+      "rgba(192, 132, 252,", // Warm purple
+      "rgba(253, 224, 71,",  // Golden yellow
+      "rgba(165, 243, 252,"  // Ice blue
+    ];
+
     const initStars = () => {
       if (!canvas) return;
       width = canvas.width = window.innerWidth;
@@ -43,16 +54,47 @@ export default function SpaceBackground() {
       stars = [];
       shootingStars = [];
       
-      // Twinkling stars far away (some very faint, some brighter)
-      for (let i = 0; i < 300; i++) {
-        const baseAlpha = Math.random() * 0.6 + 0.15;
+      // 1. Distant, tiny background stars (high density, very subtle)
+      for (let i = 0; i < 220; i++) {
+        const baseAlpha = Math.random() * 0.35 + 0.1;
         stars.push({
           x: Math.random() * width,
           y: Math.random() * height,
-          r: Math.random() * 1.0 + 0.3,
+          r: Math.random() * 0.7 + 0.2,
           alpha: baseAlpha,
           baseAlpha: baseAlpha,
-          twinkleSpeed: Math.random() * 0.015 + 0.005,
+          twinkleSpeed: (Math.random() * 0.006 + 0.002) * (Math.random() > 0.5 ? 1 : -1),
+          color: starColors[Math.floor(Math.random() * 2)], // white or cyan
+        });
+      }
+
+      // 2. Medium bright colorful stars (medium density)
+      for (let i = 0; i < 80; i++) {
+        const baseAlpha = Math.random() * 0.5 + 0.25;
+        stars.push({
+          x: Math.random() * width,
+          y: Math.random() * height,
+          r: Math.random() * 1.1 + 0.7,
+          alpha: baseAlpha,
+          baseAlpha: baseAlpha,
+          twinkleSpeed: (Math.random() * 0.012 + 0.004) * (Math.random() > 0.5 ? 1 : -1),
+          color: starColors[Math.floor(Math.random() * starColors.length)],
+        });
+      }
+
+      // 3. Majestic shining flare stars (low density, sparkling cross flares)
+      for (let i = 0; i < 15; i++) {
+        const baseAlpha = Math.random() * 0.4 + 0.45;
+        stars.push({
+          x: Math.random() * width,
+          y: Math.random() * height,
+          r: Math.random() * 1.2 + 1.3,
+          alpha: baseAlpha,
+          baseAlpha: baseAlpha,
+          twinkleSpeed: (Math.random() * 0.018 + 0.008) * (Math.random() > 0.5 ? 1 : -1),
+          color: starColors[Math.floor(Math.random() * 3)], // white, cyan, or purple
+          isShiningFlare: true,
+          flareSize: Math.random() * 7 + 6,
         });
       }
     };
@@ -63,18 +105,43 @@ export default function SpaceBackground() {
       if (!ctx || !canvas) return;
       ctx.clearRect(0, 0, width, height);
 
-      // Draw faint, twinkling stars
+      // Draw beautiful, twinkling stars
       stars.forEach((s) => {
         ctx.beginPath();
         ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255, 255, 255, ${s.alpha})`;
+        ctx.fillStyle = `${s.color}${s.alpha})`;
         ctx.fill();
 
-        // Natural soft twinkling glow
+        // If the star is a majestic flare star, draw a glowing 4-point cross lens flare!
+        if (s.isShiningFlare && s.alpha > 0.2) {
+          const flareSize = (s.flareSize || 8) * s.alpha;
+          ctx.beginPath();
+          ctx.strokeStyle = `${s.color}${s.alpha * 0.55})`;
+          ctx.lineWidth = 0.85;
+          // Horizontal glow line
+          ctx.moveTo(s.x - flareSize, s.y);
+          ctx.lineTo(s.x + flareSize, s.y);
+          // Vertical glow line
+          ctx.moveTo(s.x, s.y - flareSize);
+          ctx.lineTo(s.x, s.y + flareSize);
+          ctx.stroke();
+
+          // Core diamond bloom
+          ctx.beginPath();
+          ctx.fillStyle = `${s.color}${s.alpha * 0.35})`;
+          ctx.moveTo(s.x, s.y - 3);
+          ctx.lineTo(s.x + 3, s.y);
+          ctx.lineTo(s.x, s.y + 3);
+          ctx.lineTo(s.x - 3, s.y);
+          ctx.closePath();
+          ctx.fill();
+        }
+
+        // Natural soft twinkling glow oscillation
         s.alpha += s.twinkleSpeed;
         if (s.alpha > s.baseAlpha + 0.25 || s.alpha > 0.95) {
           s.twinkleSpeed = -Math.abs(s.twinkleSpeed);
-        } else if (s.alpha < s.baseAlpha - 0.25 || s.alpha < 0.1) {
+        } else if (s.alpha < s.baseAlpha - 0.25 || s.alpha < 0.08) {
           s.twinkleSpeed = Math.abs(s.twinkleSpeed);
         }
       });

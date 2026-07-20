@@ -2268,6 +2268,11 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
               ]);
             }}
             systemState={liveVoiceActive ? "LISTENING (VOICE ACTIVE)" : "SECURED & STANDBY"}
+            userId={user?.uid}
+            emailsCount={emails.length}
+            eventsCount={events.length}
+            tasksCount={tasks.length}
+            dbLogsCount={dbLogs.length}
           />
         </div>
 
