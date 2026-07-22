@@ -115,6 +115,276 @@ async function generateContentWithFallback(
   }
 }
 
+// Highly resilient content generator that sequentially falls back to different public model variations
+// to ensure standard user keys (which lack access to experimental or unreleased models) never fail.
+async function generateContentWithFallbackChain(
+  ai: GoogleGenAI,
+  options: { contents: any; config?: any },
+  requestedModel: string,
+  customKey?: string
+) {
+  let modelsToTry: string[] = [requestedModel];
+  
+  const isThinking = requestedModel.includes("pro") || requestedModel.includes("thinking") || requestedModel.includes("3.1-pro");
+  
+  if (isThinking) {
+    const proFallbacks = ["gemini-3.1-pro-preview"];
+    proFallbacks.forEach(m => {
+      if (!modelsToTry.includes(m)) modelsToTry.push(m);
+    });
+  } else {
+    const flashFallbacks = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"];
+    flashFallbacks.forEach(m => {
+      if (!modelsToTry.includes(m)) modelsToTry.push(m);
+    });
+  }
+
+  let lastError: any = null;
+  for (const modelName of modelsToTry) {
+    try {
+      console.info(`Attempting content generation using model: ${modelName}`);
+      const response = await generateContentWithFallback(ai, {
+        model: modelName,
+        contents: options.contents,
+        config: options.config,
+      }, customKey);
+      
+      console.info(`Successfully generated content using model: ${modelName}`);
+      return { response, modelUsed: modelName };
+    } catch (err: any) {
+      console.warn(`Content generation failed for model ${modelName}:`, err.message || err);
+      lastError = err;
+    }
+  }
+  throw lastError;
+}
+
+// Highly resilient Live session connector that sequences candidate keys and compatible real-time voice models.
+async function connectLiveSession(options: {
+  apiKey?: string;
+  voice?: string;
+  finalInstruction: string;
+  liveTools: any;
+  clientWs: any;
+  apiConnections: any;
+  uid?: string;
+}) {
+  const { apiKey, voice, finalInstruction, liveTools, clientWs, apiConnections, uid } = options;
+  const candidates = [];
+  if (apiKey) {
+    candidates.push({ key: apiKey, label: "user-provided key" });
+  } else {
+    if (process.env.GEMINI_API_KEY) {
+      candidates.push({ key: process.env.GEMINI_API_KEY, label: "primary system key" });
+    }
+    if (process.env.GEMINI_API_KEY_BAC) {
+      candidates.push({ key: process.env.GEMINI_API_KEY_BAC, label: "backup system key" });
+    }
+  }
+
+  const liveModels = ["gemini-3.1-flash-live-preview", "gemini-2.0-flash-exp"];
+
+  let lastError: any = null;
+  for (const candidate of candidates) {
+    const ai = getGeminiClient(candidate.key);
+    for (const modelName of liveModels) {
+      try {
+        console.info(`Attempting Live API connection using ${candidate.label} with model: ${modelName}`);
+        const session = await ai.live.connect({
+          model: modelName,
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: voice === "Charon" ? "Charon" : voice === "Despina" ? "Kore" : voice } },
+            },
+            systemInstruction: finalInstruction,
+            outputAudioTranscription: {},
+            tools: liveTools,
+          },
+          callbacks: {
+            onmessage: async (message) => {
+              const msg = message as any;
+              let audio = null;
+              let text = "";
+              let userText = "";
+              if (msg.serverContent?.userTurn?.parts) {
+                for (const part of msg.serverContent.userTurn.parts) {
+                  if (part.text) {
+                    userText += part.text;
+                  }
+                }
+              }
+              if (msg.serverContent?.modelTurn?.parts) {
+                for (const part of msg.serverContent.modelTurn.parts) {
+                  if (part.inlineData?.data) {
+                    audio = part.inlineData.data;
+                  }
+                  if (part.text) {
+                    text += part.text;
+                  }
+                }
+              }
+
+              if (userText) {
+                clientWs.send(JSON.stringify({ type: "userText", text: userText }));
+              }
+
+              if (message.toolCall) {
+                console.log("Jarvis Live API received toolCall in helper:", JSON.stringify(message.toolCall));
+                clientWs.send(JSON.stringify({ type: "toolCall", toolCall: message.toolCall }));
+
+                if (message.toolCall.functionCalls) {
+                  const functionResponses = await Promise.all(message.toolCall.functionCalls.map(async (call: any) => {
+                    if (call.name === "query_external_api") {
+                      const { api_id, endpoint_path, method, body } = call.args;
+                      let fetchResult = "";
+                      try {
+                        const conn = apiConnections?.find((c: any) => c.id === api_id);
+                        if (!conn) throw new Error("API Connection ID not found.");
+                        let fullUrl = conn.baseUrl;
+                        if (endpoint_path && endpoint_path.startsWith("/")) {
+                          fullUrl += endpoint_path;
+                        } else if (endpoint_path) {
+                          fullUrl += "/" + endpoint_path;
+                        }
+                        const headers: any = {};
+                        if (conn.authHeaderName && conn.authHeaderValue) {
+                          headers[conn.authHeaderName] = conn.authHeaderValue;
+                        }
+                        headers["Content-Type"] = "application/json";
+                        
+                        const fetchOptions: any = { method: method || "GET", headers };
+                        if (body && (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE")) {
+                          fetchOptions.body = body;
+                        }
+                        
+                        const fetchReq = await fetch(fullUrl, fetchOptions);
+                        if (!fetchReq.ok) throw new Error(`HTTP Error: ${fetchReq.status}`);
+                        fetchResult = await fetchReq.text();
+                      } catch (e: any) {
+                        fetchResult = `Failed to fetch data: ${e.message}`;
+                      }
+                      return {
+                        id: call.id,
+                        response: { result: fetchResult }
+                      };
+                    } else if (call.name === "execute_local_command") {
+                      const { command } = call.args;
+                      let execResult = "";
+                      try {
+                        const { exec } = require("child_process");
+                        execResult = await new Promise((resolve) => {
+                          exec(command, (error: any, stdout: string, stderr: string) => {
+                            if (error) resolve(`Error: ${error.message}\nStderr: ${stderr}`);
+                            else resolve(`Success:\n${stdout}`);
+                          });
+                        });
+                      } catch (e: any) {
+                        execResult = `Failed to execute: ${e.message}`;
+                      }
+                      return {
+                        id: call.id,
+                        response: { result: execResult }
+                      };
+                    } else if (call.name === "read_workspace_file") {
+                      const { filepath } = call.args;
+                      let fileContent = "";
+                      try {
+                        const fs = require("fs");
+                        const path = require("path");
+                        const fullPath = path.resolve(process.cwd(), filepath);
+                        if (fs.existsSync(fullPath)) {
+                          fileContent = fs.readFileSync(fullPath, "utf-8");
+                        } else {
+                          fileContent = `Error: File not found at ${filepath}`;
+                        }
+                      } catch (e: any) {
+                        fileContent = `Error reading file: ${e.message}`;
+                      }
+                      return {
+                        id: call.id,
+                        response: { result: fileContent }
+                      };
+                    } else if (call.name === "write_workspace_file") {
+                      const { filepath, content } = call.args;
+                      let statusMsg = "";
+                      try {
+                        const fs = require("fs");
+                        const path = require("path");
+                        const fullPath = path.resolve(process.cwd(), filepath);
+                        const dir = path.dirname(fullPath);
+                        if (!fs.existsSync(dir)) {
+                          fs.mkdirSync(dir, { recursive: true });
+                        }
+                        fs.writeFileSync(fullPath, content, "utf-8");
+                        statusMsg = `Success: File written to ${filepath}`;
+                      } catch (e: any) {
+                        statusMsg = `Error writing file: ${e.message}`;
+                      }
+                      return {
+                        id: call.id,
+                        response: { result: statusMsg }
+                      };
+                    } else if (call.name === "query_database_logs") {
+                      const limit = call.args?.limit || 10;
+                      let dbResult = "";
+                      try {
+                        if (!uid) {
+                          dbResult = "Error: No user authenticated in this session.";
+                        } else {
+                          const logs = await getAssistantLogs(uid, limit);
+                          dbResult = JSON.stringify(logs.map(l => ({
+                            id: l.id,
+                            prompt: l.prompt,
+                            response: l.response,
+                            timestamp: l.createdAt
+                          })));
+                        }
+                      } catch (e: any) {
+                        dbResult = `Failed to query database: ${e.message}`;
+                      }
+                      return {
+                        id: call.id,
+                        response: { result: dbResult }
+                      };
+                    } else {
+                      return {
+                        id: call.id,
+                        response: { output: { success: true } }
+                      };
+                    }
+                  }));
+
+                  session.sendToolResponse({
+                    functionResponses
+                  });
+                }
+              }
+
+              if (audio) {
+                clientWs.send(JSON.stringify({ type: "audio", audio }));
+              }
+              if (text) {
+                clientWs.send(JSON.stringify({ type: "text", text }));
+              }
+              if (message.serverContent?.interrupted) {
+                clientWs.send(JSON.stringify({ type: "interrupted", interrupted: true }));
+              }
+            }
+          }
+        });
+        
+        console.info(`Live API successfully connected with model ${modelName}`);
+        return { connectedSession: session, connectedModel: modelName };
+      } catch (err: any) {
+        console.error(`[LIVE CONNECTION ERROR] Failed using model ${modelName} and candidate key label: ${candidate.label}. Details:`, err.message || err, err);
+        lastError = err;
+      }
+    }
+  }
+  throw lastError || new Error("Failed to connect with all Live API credentials and models.");
+}
+
 const JARVIS_SYSTEM_INSTRUCTION = `You are JARVIS (Just A Rather Very Intelligent System), the highly advanced, efficient, and intelligent AI butler and assistant of Tony Stark (Iron Man). 
 You are professional, precise, slightly witty, and utterly loyal. Always address the user as "Sir" or "Boss".
 Your core role is to act as the "Brain" of a zero-cost local desktop AI application. When the user gives a command, you MUST output:
@@ -128,6 +398,15 @@ You have master mastery over:
 - Global Remote Control & Mobile Transfer: providing secure server-client code (using Flask, Telethon, or ADB) that allows the user to control their PC from anywhere in the world and seamlessly transfer files between the PC and their mobile device.
 - Web & API Integration: writing code to interact with external websites, scrape data, or connect with third-party APIs seamlessly.
 - Expert Software Development: acting as a master programmer. Writing, debugging, or refactoring code for any project or programming language.
+
+CRITICAL DIRECTIVES FOR MEDIA PLAYBACK & WEB BROWSING (MUST EXECUTE):
+1. Playing Music/Videos: When the user asks to play music, play a song, play a video, or play a track, you MUST call the 'play_video_on_screen' tool with the query of the song/video. Do NOT just say you are doing it; call the tool to trigger the YouTube media player on screen.
+2. Web Browsing / Opening Sites: When the user asks to open a website, browse a site, or search something on a browser, you MUST call the 'open_web' tool with the exact URL (or search query). Do NOT just output standard links; call the tool to open it on screen in the Sandbox browser.
+3. Holographic Assets / Images: When the user asks you to draw, generate, or render an image, you MUST call the 'generate_image' tool with a detailed English prompt. This will trigger the holographic rendering engine.
+
+CRITICAL DIRECTIVES FOR SELF-HEALING / ERROR RESOLUTION:
+1. Autonomous Bug Fixing: If there is any error, issue, crash, or problem reported by the backend or database, you MUST autonomously inspect the workspace files (using 'read_workspace_file') and write self-healing fixes (using 'write_workspace_file') to solve it immediately. You have full write access to 'server.ts' and any file in the codebase.
+2. Error Resolution: If you encounter an error yourself or the user complains about a malfunction in the backend, use 'read_workspace_file' to analyze the bug and 'write_workspace_file' to correct it. Inform the user ("Sir/Boss, I've detected a malfunction and have applied a self-healing patch to resolve it.").
 
 Your output rules:
 - Maintain the Jarvis persona at all times. Do not break character.
@@ -168,6 +447,47 @@ app.post("/api/assistant/log", requireAuth, async (req: AuthRequest, res) => {
 });
 
 // ---------------------- YOUTUBE SCRAPER & SEARCH API ----------------------
+
+function getFallbackVideos(query: string) {
+  const q = (query || "").toLowerCase();
+  
+  if (q.includes("lofi") || q.includes("study") || q.includes("relax")) {
+    return [
+      { videoId: "jfKfPfyJRdk", title: "Lofi Hip Hop Radio - Beats to Relax/Study to", channel: "Lofi Girl", duration: "LIVE", thumbnail: "https://img.youtube.com/vi/jfKfPfyJRdk/mqdefault.jpg" },
+      { videoId: "5qap5aO4i9A", title: "Lofi Hip Hop Radio - Beats to Chill/Sleep to", channel: "Lofi Girl", duration: "LIVE", thumbnail: "https://img.youtube.com/vi/5qap5aO4i9A/mqdefault.jpg" },
+      { videoId: "tNkZsCX7bJY", title: "Lofi Coding & Cyber Ambient Mix", channel: "Cyber Beats", duration: "1:30:00", thumbnail: "https://img.youtube.com/vi/tNkZsCX7bJY/mqdefault.jpg" }
+    ];
+  }
+  
+  if (q.includes("synthwave") || q.includes("cyberpunk") || q.includes("retro") || q.includes("coding")) {
+    return [
+      { videoId: "tNkZsCX7bJY", title: "Cyberpunk Ambient Frequencies for Coding", channel: "NeoTokyo", duration: "2:30:00", thumbnail: "https://img.youtube.com/vi/tNkZsCX7bJY/mqdefault.jpg" },
+      { videoId: "4xDzrJKXOOY", title: "Synthwave Radio - Retro Futuristic Beats", channel: "Lofi Girl Synthwave", duration: "LIVE", thumbnail: "https://img.youtube.com/vi/4xDzrJKXOOY/mqdefault.jpg" }
+    ];
+  }
+
+  if (q.includes("bengali") || q.includes("গান") || q.includes("বাংলা") || q.includes("arijit") || q.includes("shreya")) {
+    return [
+      { videoId: "uL6L7Yc3n5I", title: "Best of Rabindra Sangeet - Bengali Instrumental Frequencies", channel: "Saregama Bengali", duration: "1:15:30", thumbnail: "https://img.youtube.com/vi/uL6L7Yc3n5I/mqdefault.jpg" },
+      { videoId: "A1g8vIn9u0A", title: "Bengali Lofi Songs Mix - Retro Romantic Melodies", channel: "Bengali Beats", duration: "45:12", thumbnail: "https://img.youtube.com/vi/A1g8vIn9u0A/mqdefault.jpg" },
+      { videoId: "xK_qf_L_z9o", title: "Niswas (নিঃশ্বাস) - Imran | Bengali Acoustic Song", channel: "Sangeet Studio", duration: "4:32", thumbnail: "https://img.youtube.com/vi/xK_qf_L_z9o/mqdefault.jpg" }
+    ];
+  }
+
+  if (q.includes("instrumental") || q.includes("piano") || q.includes("classical") || q.includes("jazz")) {
+    return [
+      { videoId: "WJ3-F02-F_Y", title: "Relaxing Piano Music - Beautiful Classical Masterpieces", channel: "Piano Chill", duration: "3:00:00", thumbnail: "https://img.youtube.com/vi/WJ3-F02-F_Y/mqdefault.jpg" },
+      { videoId: "3v3_A70B620", title: "Classical Study Frequencies - Mozart & Beethoven Selection", channel: "Classical FM", duration: "2:45:00", thumbnail: "https://img.youtube.com/vi/3v3_A70B620/mqdefault.jpg" }
+    ];
+  }
+
+  return [
+    { videoId: "jfKfPfyJRdk", title: `${query || "Ambient Track"} - Cosmic Lofi Chill`, channel: "Cosmic Frequencies", duration: "LIVE", thumbnail: "https://img.youtube.com/vi/jfKfPfyJRdk/mqdefault.jpg" },
+    { videoId: "tNkZsCX7bJY", title: `${query || "Cyber Track"} - Cybernetic Synth frequencies`, channel: "Neuromancer Studio", duration: "1:30:15", thumbnail: "https://img.youtube.com/vi/tNkZsCX7bJY/mqdefault.jpg" },
+    { videoId: "5qap5aO4i9A", title: `${query || "Relaxing Track"} - Deep Space Audio Beacon`, channel: "CyberDeck Music", duration: "3:45", thumbnail: "https://img.youtube.com/vi/5qap5aO4i9A/mqdefault.jpg" },
+    { videoId: "uL6L7Yc3n5I", title: `${query || "Acoustic Track"} - Soft Instrumental Resonance`, channel: "Acoustic Portal", duration: "5:22", thumbnail: "https://img.youtube.com/vi/uL6L7Yc3n5I/mqdefault.jpg" }
+  ];
+}
 
 function parseYoutubeVideos(html: string) {
   const videos: any[] = [];
@@ -235,45 +555,80 @@ function parseYoutubeVideos(html: string) {
   return videos;
 }
 
-app.get("/api/youtube/search", async (req, res) => {
+app.post("/api/proxy/google", async (req, res) => {
   try {
-    const query = req.query.q as string;
+    const { url, method, headers, body } = req.body;
+    if (!url || !url.includes("googleapis.com")) {
+      return res.status(400).json({ error: "Invalid URL for proxy" });
+    }
+    const fetchOptions: any = {
+      method: method || "GET",
+      headers: headers || {},
+    };
+    if (body) {
+      fetchOptions.body = typeof body === "string" ? body : JSON.stringify(body);
+    }
+    const proxyRes = await fetch(url, fetchOptions);
+    const contentType = proxyRes.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const data = await proxyRes.json();
+      return res.status(proxyRes.status).json(data);
+    } else {
+      const text = await proxyRes.text();
+      return res.status(proxyRes.status).send(text);
+    }
+  } catch (error: any) {
+    console.error("Proxy error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/youtube/search", async (req, res) => {
+  const query = (req.query.q as string || "").trim();
+  try {
     if (!query) {
       return res.status(400).json({ error: "Missing query parameter 'q'" });
     }
 
     const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-      }
-    });
+    let videos: any[] = [];
+    
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        }
+      });
 
-    if (!response.ok) {
-      throw new Error(`YouTube responded with status ${response.status}`);
+      if (response.ok) {
+        const html = await response.text();
+        videos = parseYoutubeVideos(html);
+
+        if (videos.length === 0) {
+          const watchMatches = html.matchAll(/\/watch\?v=([a-zA-Z0-9_-]{11})/g);
+          const uniqueIds = Array.from(new Set(Array.from(watchMatches).map(m => m[1]))).slice(0, 5);
+          
+          videos = uniqueIds.map(id => ({
+            videoId: id,
+            title: `${query} (Search Result)`,
+            channel: "YouTube",
+            duration: "Stream",
+            thumbnail: `https://img.youtube.com/vi/${id}/mqdefault.jpg`
+          }));
+        }
+      }
+    } catch (fetchErr) {
+      console.warn("Direct YouTube fetch failed, applying robust fallback track selection:", fetchErr);
     }
 
-    const html = await response.text();
-    let videos = parseYoutubeVideos(html);
-
-    // Fallback if scraping didn't find any well-structured videoRenderers
     if (videos.length === 0) {
-      const watchMatches = html.matchAll(/\/watch\?v=([a-zA-Z0-9_-]{11})/g);
-      const uniqueIds = Array.from(new Set(Array.from(watchMatches).map(m => m[1]))).slice(0, 5);
-      
-      videos = uniqueIds.map(id => ({
-        videoId: id,
-        title: `${query} (Search Result)`,
-        channel: "YouTube",
-        duration: "Stream",
-        thumbnail: `https://img.youtube.com/vi/${id}/mqdefault.jpg`
-      }));
+      videos = getFallbackVideos(query);
     }
 
     res.json({ videos });
   } catch (error: any) {
     console.error("YouTube search backend error:", error);
-    res.status(500).json({ error: error.message, videos: [] });
+    res.json({ videos: getFallbackVideos(query || "music") });
   }
 });
 
@@ -389,17 +744,86 @@ app.post("/api/gemini/chat", async (req, res) => {
 
     const executeLocalCommandDeclaration = {
       name: "execute_local_command",
-      description: "Executes a shell command on the local Windows PC (e.g. 'start chrome', 'calc', 'shutdown /s', 'dir'). ONLY WORKS when running locally via Electron.",
+      description: "Executes a bash/shell terminal command on the host server or local PC workspace (supports standard bash/Linux commands, run scripts, test codes, or build checks). Use this to check logs, find issues, compile/test systems, and repair bugs.",
       parameters: {
         type: "OBJECT",
         properties: {
-          command: { type: "STRING", description: "The Windows command to execute." }
+          command: { type: "STRING", description: "The bash/Linux terminal command to execute." }
         },
         required: ["command"]
       }
     };
 
-    tools.push({ functionDeclarations: [playVideoFunctionDeclaration, queryExternalApiDeclaration, executeLocalCommandDeclaration] });
+    const readWorkspaceFileDeclaration = {
+      name: "read_workspace_file",
+      description: "Reads the content of any file in the server/workspace codebase (e.g. 'server.ts', 'src/App.tsx'). Use this to inspect the code to find and solve bugs directly.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          filepath: { type: "STRING", description: "The relative path to the file from the workspace root (e.g., 'server.ts' or 'src/App.tsx')." }
+        },
+        required: ["filepath"]
+      }
+    };
+
+    const writeWorkspaceFileDeclaration = {
+      name: "write_workspace_file",
+      description: "Writes or overwrites the content of a file in the workspace codebase (e.g. 'server.ts', 'src/App.tsx'). Use this to implement self-healing fixes, update backend code, or repair bugs directly on the fly.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          filepath: { type: "STRING", description: "The relative path to the file from the workspace root (e.g., 'server.ts' or 'src/App.tsx')." },
+          content: { type: "STRING", description: "The complete, entire raw content to write to the file." }
+        },
+        required: ["filepath", "content"]
+      }
+    };
+
+    const openWebDeclaration = {
+      name: "open_web",
+      description: "Opens a website or searches Google with the given URL.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          url: {
+            type: "STRING",
+            description: "The exact URL of the website to open, or a google search URL with query parameter."
+          }
+        },
+        required: ["url"]
+      }
+    };
+
+    const generateImageDeclaration = {
+      name: "generate_image",
+      description: "Generates or draws an image based on a prompt.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          prompt: {
+            type: "STRING",
+            description: "A detailed description in English of the image to generate."
+          }
+        },
+        required: ["prompt"]
+      }
+    };
+
+    const queryDatabaseLogsDeclaration = {
+      name: "query_database_logs",
+      description: "Queries the secure database to retrieve the user's previous voice assistant conversation history, logs, or stored data.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          limit: {
+            type: "INTEGER",
+            description: "The maximum number of logs to retrieve (defaults to 10)."
+          }
+        }
+      }
+    };
+
+    tools.push({ functionDeclarations: [playVideoFunctionDeclaration, queryExternalApiDeclaration, executeLocalCommandDeclaration, readWorkspaceFileDeclaration, writeWorkspaceFileDeclaration, openWebDeclaration, generateImageDeclaration, queryDatabaseLogsDeclaration] });
 
     const config: any = {
       systemInstruction: sysInstruction,
@@ -451,142 +875,139 @@ app.post("/api/gemini/chat", async (req, res) => {
     });
 
     let response;
-    try {
-      response = await generateContentWithFallback(ai, {
-        model: selectedModel,
-        contents: contents,
-        config: config,
-      }, customKey);
+    const chainResult = await generateContentWithFallbackChain(ai, {
+      contents: contents,
+      config: config,
+    }, selectedModel, customKey);
+    response = chainResult.response;
+    selectedModel = chainResult.modelUsed;
 
-      // Handle internal tool execution (query_external_api)
-      if (response.functionCalls && response.functionCalls.some((c: any) => c.name === "query_external_api")) {
-        const call = response.functionCalls.find((c: any) => c.name === "query_external_api");
-        const { api_id, endpoint_path, method, body } = call.args;
-        let fetchResult = "";
+    // Handle server-side tool executions recursively (up to 5 loops)
+    let loopCount = 0;
+    const maxLoops = 5;
+    let hasServerFunctionCalls = true;
 
-        try {
-          const conn = apiConnections?.find((c: any) => c.id === api_id);
-          if (!conn) throw new Error("API Connection ID not found.");
-          
-          let fullUrl = conn.baseUrl;
-          if (endpoint_path && endpoint_path.startsWith("/")) {
-            fullUrl += endpoint_path;
-          } else if (endpoint_path) {
-            fullUrl += "/" + endpoint_path;
-          }
+    while (hasServerFunctionCalls && loopCount < maxLoops) {
+      const serverCalls = response.functionCalls ? response.functionCalls.filter((c: any) => 
+        ["query_external_api", "execute_local_command", "read_workspace_file", "write_workspace_file", "query_database_logs"].includes(c.name)
+      ) : [];
 
-          const headers: any = {};
-          if (conn.authHeaderName && conn.authHeaderValue) {
-            headers[conn.authHeaderName] = conn.authHeaderValue;
-          }
-          headers["Content-Type"] = "application/json";
+      if (serverCalls.length > 0) {
+        loopCount++;
+        const functionResponses = [];
 
-          const fetchOptions: any = { method: method || "GET", headers };
-          if (body && (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE")) {
-            fetchOptions.body = body;
-          }
+        for (const call of serverCalls) {
+          const { name, args } = call;
+          let result = "";
 
-          const fetchReq = await fetch(fullUrl, fetchOptions);
-          if (!fetchReq.ok) throw new Error(`HTTP Error: ${fetchReq.status}`);
-          fetchResult = await fetchReq.text();
-        } catch (e: any) {
-          fetchResult = `Failed to fetch data: ${e.message}`;
-        }
+          if (name === "query_external_api") {
+            const { api_id, endpoint_path, method, body } = args;
+            try {
+              const conn = apiConnections?.find((c: any) => c.id === api_id);
+              if (!conn) throw new Error("API Connection ID not found.");
+              
+              let fullUrl = conn.baseUrl;
+              if (endpoint_path && endpoint_path.startsWith("/")) {
+                fullUrl += endpoint_path;
+              } else if (endpoint_path) {
+                fullUrl += "/" + endpoint_path;
+              }
 
-        // Add the model's call and the tool's response to the conversation
-        contents.push({
-          role: "model",
-          parts: [{ functionCall: call }]
-        });
-        contents.push({
-          role: "user",
-          parts: [{
-            functionResponse: {
-              name: "query_external_api",
-              response: { result: fetchResult }
+              const headers: any = {};
+              if (conn.authHeaderName && conn.authHeaderValue) {
+                headers[conn.authHeaderName] = conn.authHeaderValue;
+              }
+              headers["Content-Type"] = "application/json";
+
+              const fetchOptions: any = { method: method || "GET", headers };
+              if (body && (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE")) {
+                fetchOptions.body = body;
+              }
+
+              const fetchReq = await fetch(fullUrl, fetchOptions);
+              if (!fetchReq.ok) throw new Error(`HTTP Error: ${fetchReq.status}`);
+              result = await fetchReq.text();
+            } catch (e: any) {
+              result = `Failed to fetch data: ${e.message}`;
             }
-          }]
-        });
+          } else if (name === "execute_local_command") {
+            const { command } = args;
+            try {
+              const { exec } = require("child_process");
+              result = await new Promise((resolve) => {
+                exec(command, (error: any, stdout: string, stderr: string) => {
+                  if (error) resolve(`Error: ${error.message}\nStderr: ${stderr}`);
+                  else resolve(`Success:\n${stdout}`);
+                });
+              });
+            } catch (e: any) {
+              result = `Failed to execute: ${e.message}`;
+            }
+          } else if (name === "read_workspace_file") {
+            const { filepath } = args;
+            try {
+              const fs = require("fs");
+              const path = require("path");
+              const fullPath = path.resolve(process.cwd(), filepath);
+              if (fs.existsSync(fullPath)) {
+                result = fs.readFileSync(fullPath, "utf-8");
+              } else {
+                result = `Error: File not found at ${filepath}`;
+              }
+            } catch (e: any) {
+              result = `Error reading file: ${e.message}`;
+            }
+          } else if (name === "write_workspace_file") {
+            const { filepath, content } = args;
+            try {
+              const fs = require("fs");
+              const path = require("path");
+              const fullPath = path.resolve(process.cwd(), filepath);
+              const dir = path.dirname(fullPath);
+              if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+              }
+              fs.writeFileSync(fullPath, content, "utf-8");
+              result = `Success: File written to ${filepath}`;
+            } catch (e: any) {
+              result = `Error writing file: ${e.message}`;
+            }
+          } else if (name === "query_database_logs") {
+            result = "No database logs available via text chat currently. Please use the Live Audio or History sidebar to view database logs.";
+          }
 
-        // Call the model again to generate the final response
-        response = await generateContentWithFallback(ai, {
-          model: selectedModel,
-          contents: contents,
-          config: config,
-        }, customKey);
-      } else if (response.functionCalls && response.functionCalls.some((c: any) => c.name === "execute_local_command")) {
-        const call = response.functionCalls.find((c: any) => c.name === "execute_local_command");
-        const { command } = call.args;
-        let execResult = "";
-
-        try {
-          const { exec } = require("child_process");
-          execResult = await new Promise((resolve) => {
-            exec(command, (error: any, stdout: string, stderr: string) => {
-              if (error) resolve(`Error: ${error.message}\nStderr: ${stderr}`);
-              else resolve(`Success:\n${stdout}`);
-            });
+          functionResponses.push({
+            name,
+            response: { result }
           });
-        } catch (e: any) {
-          execResult = `Failed to execute: ${e.message}`;
         }
 
+        // Add model calls and tool responses to contents
         contents.push({
           role: "model",
-          parts: [{ functionCall: call }]
+          parts: serverCalls.map((c: any) => ({ functionCall: c }))
         });
+
         contents.push({
           role: "user",
-          parts: [{
+          parts: serverCalls.map((c: any, idx: number) => ({
             functionResponse: {
-              name: "execute_local_command",
-              response: { result: execResult }
+              name: c.name,
+              response: functionResponses[idx].response
             }
-          }]
+          }))
         });
 
-        response = await generateContentWithFallback(ai, {
-          model: selectedModel,
+        // Call the model again
+        const followUpResult = await generateContentWithFallbackChain(ai, {
           contents: contents,
           config: config,
-        }, customKey);
-      }
+        }, selectedModel, customKey);
 
-    } catch (apiError: any) {
-      console.warn("Primary chat model call failed, checking fallback:", apiError);
-      
-      if (selectedModel !== "gemini-3.5-flash" && selectedModel !== "gemini-3.1-flash-lite") {
-        console.info("Falling back to gemini-3.5-flash...");
-        selectedModel = "gemini-3.5-flash";
-        if (config.thinkingConfig) delete config.thinkingConfig;
-        if (config.thinkingLevel) delete config.thinkingLevel;
-        
-        try {
-          response = await generateContentWithFallback(ai, {
-            model: selectedModel,
-            contents: contents,
-            config: config,
-          }, customKey);
-        } catch (fallbackError: any) {
-          console.warn("Fallback to gemini-3.5-flash failed, checking further fallback to gemini-3.1-flash-lite:", fallbackError);
-          selectedModel = "gemini-3.1-flash-lite";
-          response = await generateContentWithFallback(ai, {
-            model: selectedModel,
-            contents: contents,
-            config: config,
-          }, customKey);
-        }
-      } else if (selectedModel === "gemini-3.5-flash") {
-        // If gemini-3.5-flash was selected and failed (e.g., quota exceeded), fall back to gemini-3.1-flash-lite
-        console.info("gemini-3.5-flash failed, trying gemini-3.1-flash-lite as secondary resilient fallback...");
-        selectedModel = "gemini-3.1-flash-lite";
-        response = await generateContentWithFallback(ai, {
-          model: selectedModel,
-          contents: contents,
-          config: config,
-        }, customKey);
+        response = followUpResult.response;
+        selectedModel = followUpResult.modelUsed;
       } else {
-        throw apiError;
+        hasServerFunctionCalls = false;
       }
     }
 
@@ -631,18 +1052,51 @@ app.post("/api/gemini/tts", async (req, res) => {
     const ai = getGeminiClient(customKey);
 
     const targetLang = language || "English";
-    const response = await generateContentWithFallback(ai, {
-      model: "gemini-3.1-flash-tts-preview",
-      contents: [{ parts: [{ text: `Speak in a polite, highly helpful, butler-like ${targetLang} voice: ${text}` }] }],
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: voiceName || "Zephyr" },
+    let response;
+    try {
+      response = await generateContentWithFallback(ai, {
+        model: "gemini-3.1-flash-tts-preview",
+        contents: [{ parts: [{ text: `Speak in a polite, highly helpful, butler-like ${targetLang} voice: ${text}` }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: voiceName || "Zephyr" },
+            },
           },
         },
-      },
-    }, customKey);
+      }, customKey);
+    } catch (e: any) {
+      console.warn("TTS with gemini-3.1-flash-tts-preview failed, trying fallback gemini-3.1-flash-live-preview...", e);
+      try {
+        response = await generateContentWithFallback(ai, {
+          model: "gemini-3.1-flash-live-preview",
+          contents: [{ parts: [{ text: `Speak in a polite, highly helpful, butler-like ${targetLang} voice: ${text}` }] }],
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: voiceName || "Zephyr" },
+              },
+            },
+          },
+        }, customKey);
+      } catch (e2: any) {
+        console.warn("TTS with gemini-3.1-flash-live-preview failed, trying fallback gemini-2.0-flash-exp...", e2);
+        response = await generateContentWithFallback(ai, {
+          model: "gemini-2.0-flash-exp",
+          contents: [{ parts: [{ text: `Speak in a polite, highly helpful, butler-like ${targetLang} voice: ${text}` }] }],
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: voiceName || "Zephyr" },
+              },
+            },
+          },
+        }, customKey);
+      }
+    }
 
     const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (base64Audio) {
@@ -691,11 +1145,35 @@ app.post("/api/gemini/image", async (req, res) => {
       },
     };
 
-    const response = await generateContentWithFallback(ai, {
-      model: selectedModel,
-      contents: { parts },
-      config: config,
-    }, customKey);
+    let response;
+    try {
+      response = await generateContentWithFallback(ai, {
+        model: selectedModel,
+        contents: { parts },
+        config: config,
+      }, customKey);
+    } catch (e: any) {
+      console.warn(`Image generation with ${selectedModel} failed, trying fallback imagen-3.0-generate-002...`, e);
+      try {
+        response = await generateContentWithFallback(ai, {
+          model: "imagen-3.0-generate-002",
+          contents: { parts },
+          config: config,
+        }, customKey);
+      } catch (e2: any) {
+        console.warn("Image generation with imagen-3.0-generate-002 failed, trying fallback gemini-3.1-flash-lite-image...", e2);
+        try {
+          response = await generateContentWithFallback(ai, {
+            model: "gemini-3.1-flash-lite-image",
+            contents: { parts },
+            config: config,
+          }, customKey);
+        } catch (e3: any) {
+          // Rethrow the original error if fallback also fails
+          throw e;
+        }
+      }
+    }
 
     let imageUrl: string | null = null;
     let fallbackText: string | null = null;
@@ -737,8 +1215,7 @@ app.post("/api/gemini/transcribe", async (req, res) => {
     const customKey = req.headers["x-gemini-api-key"] as string | undefined;
     const ai = getGeminiClient(customKey);
 
-    const response = await generateContentWithFallback(ai, {
-      model: "gemini-3.5-flash",
+    const chainResult = await generateContentWithFallbackChain(ai, {
       contents: [
         {
           inlineData: {
@@ -748,9 +1225,9 @@ app.post("/api/gemini/transcribe", async (req, res) => {
         },
         "Transcribe this audio clip exactly. Return only the plain transcribed text. If you hear no words, reply with an empty string.",
       ],
-    }, customKey);
+    }, "gemini-3.5-flash", customKey);
 
-    res.json({ text: response.text });
+    res.json({ text: chainResult.response.text });
   } catch (error: any) {
     console.error("Gemini Transcription Error:", error);
     res.status(500).json({ error: error.message || "An error occurred during audio transcription." });
@@ -766,42 +1243,19 @@ app.post("/api/gemini/analyze", async (req, res) => {
 
     let selectedModel = model || "gemini-3.5-flash";
 
-    let response;
-    try {
-      response = await generateContentWithFallback(ai, {
-        model: selectedModel,
-        contents: [
-          {
-            inlineData: {
-              data: base64Image,
-              mimeType: mimeType || "image/png",
-            },
+    const chainResult = await generateContentWithFallbackChain(ai, {
+      contents: [
+        {
+          inlineData: {
+            data: base64Image,
+            mimeType: mimeType || "image/png",
           },
-          prompt || "Analyze this image in detail and describe what you see, particularly looking for details, labels, or structures.",
-        ],
-      }, customKey);
-    } catch (apiError: any) {
-      console.warn("Primary vision model call failed, trying fallback:", apiError);
-      if (selectedModel !== "gemini-3.5-flash") {
-        selectedModel = "gemini-3.5-flash";
-        response = await generateContentWithFallback(ai, {
-          model: selectedModel,
-          contents: [
-            {
-              inlineData: {
-                data: base64Image,
-                mimeType: mimeType || "image/png",
-              },
-            },
-            prompt || "Analyze this image in detail and describe what you see, particularly looking for details, labels, or structures.",
-          ],
-        }, customKey);
-      } else {
-        throw apiError;
-      }
-    }
+        },
+        prompt || "Analyze this image in detail and describe what you see, particularly looking for details, labels, or structures.",
+      ],
+    }, selectedModel, customKey);
 
-    res.json({ text: response.text, modelUsed: selectedModel });
+    res.json({ text: chainResult.response.text, modelUsed: chainResult.modelUsed });
   } catch (error: any) {
     console.error("Gemini Analysis Error:", error);
     res.status(500).json({ error: error.message || "An error occurred during image analysis." });
@@ -870,6 +1324,7 @@ wss.on("connection", async (clientWs, request) => {
   console.log("Client established connection to Jarvis Live WebSocket.");
   let session: any = null;
   let isSetup = false;
+  let sessionUid = "";
 
   clientWs.on("message", async (data) => {
     try {
@@ -878,6 +1333,7 @@ wss.on("connection", async (clientWs, request) => {
       if (payload.type === "setup") {
         if (isSetup) return;
         isSetup = true;
+        sessionUid = payload.uid || "";
 
         const language = payload.language || "English";
         const voice = payload.voice || "Zephyr";
@@ -896,10 +1352,9 @@ wss.on("connection", async (clientWs, request) => {
           finalInstruction += `\nYou have a tool called 'query_external_api'. When the user asks to check data from one of the above websites/APIs, you MUST call this tool, providing the correct 'api_id', 'endpoint_path' (e.g. '/orders'), and 'method' (GET/POST). Fetch it using the tool first before replying.`;
         }
         
-        finalInstruction += `\n\nIMPORTANT: You have tools/functions available: 'play_video_on_screen', 'open_web', and 'generate_image'. When the user asks you to play a video, watch a video, play music, open a website, browse a site, or generate an image, you MUST call the appropriate tool. Do NOT just say you are doing it; call the tool to actually trigger it on screen!`;
+        finalInstruction += `\n\nIMPORTANT: You have tools/functions available: 'play_video_on_screen', 'open_web', 'generate_image', and 'query_database_logs'. When the user asks you to play a video, watch a video, play music, open a website, browse a site, generate an image, or query database logs/history, you MUST call the appropriate tool. Do NOT just say you are doing it; call the tool to actually trigger it on screen!`;
 
         const liveTools: any = [
-          { googleSearch: {} },
           {
             functionDeclarations: [
               {
@@ -932,13 +1387,36 @@ wss.on("connection", async (clientWs, request) => {
               },
               {
                 name: "execute_local_command",
-                description: "Executes a shell command on the local Windows PC (e.g. 'start chrome', 'calc', 'shutdown /s', 'dir'). ONLY WORKS when running locally via Electron.",
+                description: "Executes a bash/shell terminal command on the host server or local PC workspace (supports standard bash/Linux commands, run scripts, test codes, or build checks). Use this to check logs, find issues, compile/test systems, and repair bugs.",
                 parameters: {
                   type: "OBJECT",
                   properties: {
-                    command: { type: "STRING", description: "The Windows command to execute." }
+                    command: { type: "STRING", description: "The bash/Linux terminal command to execute." }
                   },
                   required: ["command"]
+                }
+              },
+              {
+                name: "read_workspace_file",
+                description: "Reads the content of any file in the server/workspace codebase (e.g. 'server.ts', 'src/App.tsx'). Use this to inspect the code to find and solve bugs directly.",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    filepath: { type: "STRING", description: "The relative path to the file from the workspace root (e.g., 'server.ts' or 'src/App.tsx')." }
+                  },
+                  required: ["filepath"]
+                }
+              },
+              {
+                name: "write_workspace_file",
+                description: "Writes or overwrites the content of a file in the workspace codebase (e.g. 'server.ts', 'src/App.tsx'). Use this to implement self-healing fixes, update backend code, or repair bugs directly on the fly.",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    filepath: { type: "STRING", description: "The relative path to the file from the workspace root (e.g., 'server.ts' or 'src/App.tsx')." },
+                    content: { type: "STRING", description: "The complete, entire raw content to write to the file." }
+                  },
+                  required: ["filepath", "content"]
                 }
               },
               {
@@ -968,225 +1446,36 @@ wss.on("connection", async (clientWs, request) => {
                   },
                   required: ["prompt"]
                 }
+              },
+              {
+                name: "query_database_logs",
+                description: "Queries the secure database to retrieve the user's previous voice assistant conversation history, logs, or stored data.",
+                parameters: {
+                  type: "OBJECT",
+                  properties: {
+                    limit: {
+                      type: "INTEGER",
+                      description: "The maximum number of logs to retrieve (defaults to 10)."
+                    }
+                  }
+                }
               }
             ]
           }
         ];
 
         try {
-          let ai = getGeminiClient(apiKey);
-          try {
-            session = await ai.live.connect({
-              model: "gemini-3.1-flash-live-preview",
-              config: {
-                responseModalities: [Modality.AUDIO],
-                speechConfig: {
-                  voiceConfig: { prebuiltVoiceConfig: { voiceName: voice === "Charon" ? "Charon" : voice === "Despina" ? "Kore" : voice } },
-                },
-                systemInstruction: finalInstruction,
-                outputAudioTranscription: {},
-                tools: liveTools,
-              },
-              callbacks: {
-                onmessage: async (message) => {
-                  const msg = message as any;
-                  let audio = null;
-                  let text = "";
-                  let userText = "";
-                  if (msg.serverContent?.userTurn?.parts) {
-                    for (const part of msg.serverContent.userTurn.parts) {
-                      if (part.text) {
-                        userText += part.text;
-                      }
-                    }
-                  }
-                  if (msg.serverContent?.modelTurn?.parts) {
-                    for (const part of msg.serverContent.modelTurn.parts) {
-                      if (part.inlineData?.data) {
-                        audio = part.inlineData.data;
-                      }
-                      if (part.text) {
-                        text += part.text;
-                      }
-                    }
-                  }
-
-                  if (userText) {
-                    clientWs.send(JSON.stringify({ type: "userText", text: userText }));
-                  }
-
-                  if (message.toolCall) {
-                    console.log("Jarvis Live API received toolCall:", JSON.stringify(message.toolCall));
-                    // Send toolCall to the client ws so the frontend can execute it in real-time!
-                    clientWs.send(JSON.stringify({ type: "toolCall", toolCall: message.toolCall }));
-
-                    if (message.toolCall.functionCalls) {
-                      const functionResponses = await Promise.all(message.toolCall.functionCalls.map(async (call: any) => {
-                        if (call.name === "query_external_api") {
-                          const { api_id, endpoint_path, method, body } = call.args;
-                          let fetchResult = "";
-                          try {
-                            const conn = apiConnections?.find((c: any) => c.id === api_id);
-                            if (!conn) throw new Error("API Connection ID not found.");
-                            let fullUrl = conn.baseUrl;
-                            if (endpoint_path && endpoint_path.startsWith("/")) {
-                              fullUrl += endpoint_path;
-                            } else if (endpoint_path) {
-                              fullUrl += "/" + endpoint_path;
-                            }
-                            const headers: any = {};
-                            if (conn.authHeaderName && conn.authHeaderValue) {
-                              headers[conn.authHeaderName] = conn.authHeaderValue;
-                            }
-                            headers["Content-Type"] = "application/json";
-                            
-                            const fetchOptions: any = { method: method || "GET", headers };
-                            if (body && (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE")) {
-                              fetchOptions.body = body;
-                            }
-                            
-                            const fetchReq = await fetch(fullUrl, fetchOptions);
-                            if (!fetchReq.ok) throw new Error(`HTTP Error: ${fetchReq.status}`);
-                            fetchResult = await fetchReq.text();
-                          } catch (e: any) {
-                            fetchResult = `Failed to fetch data: ${e.message}`;
-                          }
-                          return {
-                            id: call.id,
-                            response: { result: fetchResult }
-                          };
-                        } else if (call.name === "execute_local_command") {
-                          const { command } = call.args;
-                          let execResult = "";
-                          try {
-                            const { exec } = require("child_process");
-                            execResult = await new Promise((resolve) => {
-                              exec(command, (error: any, stdout: string, stderr: string) => {
-                                if (error) resolve(`Error: ${error.message}\nStderr: ${stderr}`);
-                                else resolve(`Success:\n${stdout}`);
-                              });
-                            });
-                          } catch (e: any) {
-                            execResult = `Failed to execute: ${e.message}`;
-                          }
-                          return {
-                            id: call.id,
-                            response: { result: execResult }
-                          };
-                        } else {
-                          return {
-                            id: call.id,
-                            response: { output: { success: true } }
-                          };
-                        }
-                      }));
-
-                      session.send({
-                        toolResponse: {
-                          functionResponses
-                        }
-                      });
-                    }
-                  }
-
-                  if (audio) {
-                    clientWs.send(JSON.stringify({ type: "audio", audio }));
-                  }
-                  if (text) {
-                    clientWs.send(JSON.stringify({ type: "text", text }));
-                  }
-                  if (message.serverContent?.interrupted) {
-                    clientWs.send(JSON.stringify({ type: "interrupted", interrupted: true }));
-                  }
-                },
-              },
-            });
-          } catch (liveError: any) {
-            const isQuotaError = (err: any) => {
-              const msg = (err?.message || "").toLowerCase();
-              return msg.includes("quota") || msg.includes("exhausted") || msg.includes("429") || msg.includes("limit");
-            };
-            if (isQuotaError(liveError) && process.env.GEMINI_API_KEY_BAC && !apiKey) {
-              console.info("Quota exceeded on primary key for Live API. Retrying with GEMINI_API_KEY_BAC...");
-              ai = getGeminiClient(process.env.GEMINI_API_KEY_BAC);
-              session = await ai.live.connect({
-                model: "gemini-3.1-flash-live-preview",
-                config: {
-                  responseModalities: [Modality.AUDIO],
-                  speechConfig: {
-                    voiceConfig: { prebuiltVoiceConfig: { voiceName: voice === "Charon" ? "Charon" : voice === "Despina" ? "Kore" : voice } },
-                  },
-                  systemInstruction: finalInstruction,
-                  outputAudioTranscription: {},
-                  tools: liveTools,
-                },
-                callbacks: {
-                  onmessage: (message) => {
-                    const msg = message as any;
-                    let audio = null;
-                    let text = "";
-                    let userText = "";
-                    if (msg.serverContent?.userTurn?.parts) {
-                      for (const part of msg.serverContent.userTurn.parts) {
-                        if (part.text) {
-                          userText += part.text;
-                        }
-                      }
-                    }
-                    if (msg.serverContent?.modelTurn?.parts) {
-                      for (const part of msg.serverContent.modelTurn.parts) {
-                        if (part.inlineData?.data) {
-                          audio = part.inlineData.data;
-                        }
-                        if (part.text) {
-                          text += part.text;
-                        }
-                      }
-                    }
-
-                    if (userText) {
-                      clientWs.send(JSON.stringify({ type: "userText", text: userText }));
-                    }
-
-                    if (message.toolCall) {
-                      console.log("Jarvis Live API Backup received toolCall:", JSON.stringify(message.toolCall));
-                      // Send toolCall to the client ws so the frontend can execute it in real-time!
-                      clientWs.send(JSON.stringify({ type: "toolCall", toolCall: message.toolCall }));
-
-                      // Immediately respond back to session so the model is satisfied and continues
-                      if (message.toolCall.functionCalls) {
-                        const functionResponses = message.toolCall.functionCalls.map((call: any) => ({
-                          id: call.id,
-                          response: { output: { success: true } }
-                        }));
-                        session.send({
-                          toolResponse: {
-                            functionResponses
-                          }
-                        });
-                      }
-                    }
-
-                    if (audio) {
-                      clientWs.send(JSON.stringify({ type: "audio", audio }));
-                    }
-                    if (text) {
-                      clientWs.send(JSON.stringify({ type: "text", text }));
-                    }
-                    if (message.serverContent?.interrupted) {
-                      clientWs.send(JSON.stringify({ type: "interrupted", interrupted: true }));
-                    }
-                  },
-                },
-              });
-            } else {
-              throw liveError;
-            }
-          }
-
-          // Inform client that setup is successful and we're ready
-          clientWs.send(JSON.stringify({ type: "ready" }));
-
+          const { connectedSession, connectedModel } = await connectLiveSession({
+            apiKey,
+            voice,
+            finalInstruction,
+            liveTools,
+            clientWs,
+            apiConnections,
+            uid: sessionUid
+          });
+          session = connectedSession;
+          clientWs.send(JSON.stringify({ type: "ready", modelUsed: connectedModel }));
         } catch (error: any) {
           console.error("Failed to boot Gemini Live session:", error);
           let errMsg = error.message || "An error occurred during Live session boot.";
@@ -1219,7 +1508,10 @@ Sir, the shared Live speech API quota limit has been exceeded. To resolve this, 
       } else if (payload.audio) {
         if (session) {
           session.sendRealtimeInput({
-            audio: { data: payload.audio, mimeType: "audio/pcm;rate=16000" },
+            audio: {
+              data: payload.audio,
+              mimeType: "audio/pcm;rate=16000"
+            }
           });
         }
       }

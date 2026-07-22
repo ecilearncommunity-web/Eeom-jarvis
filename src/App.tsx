@@ -88,8 +88,33 @@ import {
 } from "lucide-react";
 import { PCMPlayer, floatTo16BitPCM, arrayBufferToBase64 } from "./lib/audioHelper";
 import { MediaController } from "./components/MediaController";
+import { JarvisVoiceHUD } from "./components/JarvisVoiceHUD";
+
+export enum VoiceChatState {
+  IDLE = "IDLE",
+  TRANSCRIBING_INPUT_RECORDING = "TRANSCRIBING_INPUT_RECORDING",
+  TRANSCRIBING_INPUT_PROCESSING = "TRANSCRIBING_INPUT_PROCESSING",
+  LIVE_SESSION_CONNECTING = "LIVE_SESSION_CONNECTING",
+  LIVE_SESSION_CONNECTED = "LIVE_SESSION_CONNECTED",
+  GENERATING_REPLY = "GENERATING_REPLY",
+  SPEAKING_REPLY = "SPEAKING_REPLY"
+}
 
 export default function App() {
+
+  const googleApiProxy = async (url: string, options?: RequestInit) => {
+    return await fetch('/api/proxy/google', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url,
+        method: options?.method || 'GET',
+        headers: options?.headers || {},
+        body: options?.body,
+      })
+    });
+  };
+
   // Authentication & Core State
   const [user, setUser] = useState<User | null>(() => {
     if (typeof window !== "undefined") {
@@ -129,6 +154,9 @@ export default function App() {
   const [groundingMode, setGroundingMode] = useState<"none" | "search" | "maps">("search");
   const [preferredModel, setPreferredModel] = useState<string>("gemini-3.5-flash");
 
+  // Unified Lifecycle State Machine
+  const [voiceChatState, setVoiceChatState] = useState<VoiceChatState>(VoiceChatState.IDLE);
+
   // Chat Subsystem State
   const [chatMessages, setChatMessages] = useState<Message[]>([]);
   const [inputMessage, setInputMessage] = useState("");
@@ -141,6 +169,79 @@ export default function App() {
   const [liveWsStatus, setLiveWsStatus] = useState<"disconnected" | "connecting" | "connected">("disconnected");
   const [liveTextTranscript, setLiveTextTranscript] = useState<string[]>([]);
   const [liveSessionError, setLiveSessionError] = useState<string | null>(null);
+
+  const transitionToState = (newState: VoiceChatState) => {
+    console.log(`[STATE MACHINE] Transitioning from ${voiceChatState} to ${newState}`);
+    
+    // Cleanup active operations when leaving certain states
+    if (voiceChatState === VoiceChatState.TRANSCRIBING_INPUT_RECORDING && newState !== VoiceChatState.TRANSCRIBING_INPUT_RECORDING) {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        try { mediaRecorderRef.current.stop(); } catch(e){}
+      }
+      setIsRecording(false);
+    }
+
+    if ((voiceChatState === VoiceChatState.LIVE_SESSION_CONNECTING || voiceChatState === VoiceChatState.LIVE_SESSION_CONNECTED) && 
+        (newState !== VoiceChatState.LIVE_SESSION_CONNECTING && newState !== VoiceChatState.LIVE_SESSION_CONNECTED)) {
+      cleanupAudioResources();
+      setLiveVoiceActive(false);
+      setLiveWsStatus("disconnected");
+    }
+
+    if (voiceChatState === VoiceChatState.SPEAKING_REPLY && newState !== VoiceChatState.SPEAKING_REPLY) {
+      if (ttsPlayerRef.current) {
+        try { ttsPlayerRef.current.stop(); } catch(e){}
+      }
+    }
+
+    setVoiceChatState(newState);
+
+    // Synchronize legacy hooks to maintain 100% UI and external compatibility
+    switch (newState) {
+      case VoiceChatState.IDLE:
+        setIsRecording(false);
+        setIsGenerating(false);
+        setLiveVoiceActive(false);
+        setLiveWsStatus("disconnected");
+        break;
+      case VoiceChatState.TRANSCRIBING_INPUT_RECORDING:
+        setIsRecording(true);
+        setIsGenerating(false);
+        setLiveVoiceActive(false);
+        setLiveWsStatus("disconnected");
+        break;
+      case VoiceChatState.TRANSCRIBING_INPUT_PROCESSING:
+        setIsRecording(false);
+        setIsGenerating(true);
+        setLiveVoiceActive(false);
+        setLiveWsStatus("disconnected");
+        break;
+      case VoiceChatState.LIVE_SESSION_CONNECTING:
+        setIsRecording(false);
+        setIsGenerating(false);
+        setLiveVoiceActive(false);
+        setLiveWsStatus("connecting");
+        break;
+      case VoiceChatState.LIVE_SESSION_CONNECTED:
+        setIsRecording(false);
+        setIsGenerating(false);
+        setLiveVoiceActive(true);
+        setLiveWsStatus("connected");
+        break;
+      case VoiceChatState.GENERATING_REPLY:
+        setIsRecording(false);
+        setIsGenerating(true);
+        setLiveVoiceActive(false);
+        setLiveWsStatus("disconnected");
+        break;
+      case VoiceChatState.SPEAKING_REPLY:
+        setIsRecording(false);
+        setIsGenerating(false);
+        setLiveVoiceActive(false);
+        setLiveWsStatus("disconnected");
+        break;
+    }
+  };
   
   // Workspace Integration States
   const [workspaceTab, setWorkspaceTab] = useState<"gmail" | "calendar" | "tasks" | "meet" | "chat">("gmail");
@@ -489,6 +590,7 @@ Make sure to explain what you are doing matching your selected personality templ
   const liveMessageIdRef = useRef<string | null>(null);
   const lastUserTranscriptRef = useRef<string>("");
   const systemSettingsRef = useRef(systemSettings);
+  const silentCheckTimeoutRef = useRef<any>(null);
 
   useEffect(() => {
     systemSettingsRef.current = systemSettings;
@@ -693,6 +795,7 @@ Make sure to explain what you are doing matching your selected personality templ
         ]);
         setSandboxActiveTab("image");
         setShowCyberDeck(true);
+        setCurrentView("chat"); // Force view switch to show CyberDeck
         setTerminalOutput(prev => [...prev, `[CYBERDECK] Graphic payload successfully rendered.`]);
 
       } else if (type === "open_web") {
@@ -707,6 +810,7 @@ Make sure to explain what you are doing matching your selected personality templ
         setSandboxBrowserUrl(url);
         setSandboxActiveTab("browser");
         setShowCyberDeck(true);
+        setCurrentView("chat"); // Force view switch to show CyberDeck
         
         setTerminalOutput(prev => [...prev, `[CYBERDECK] Loading sandbox portal: ${url}`]);
         
@@ -721,6 +825,7 @@ Make sure to explain what you are doing matching your selected personality templ
         
         setSandboxActiveTab("media");
         setShowCyberDeck(true);
+        setCurrentView("chat"); // Force view switch to show CyberDeck
         triggerYoutubeSearch(query);
         
         setProcessingActions(prev => ({
@@ -736,6 +841,7 @@ Make sure to explain what you are doing matching your selected personality templ
         setSandboxCode(code);
         setSandboxActiveTab("code");
         setShowCyberDeck(true);
+        setCurrentView("chat"); // Force view switch to show CyberDeck
         
         setSandboxTerminalLogs(prev => [
           ...prev,
@@ -755,6 +861,21 @@ Make sure to explain what you are doing matching your selected personality templ
           ]);
         }, 1200);
 
+        setProcessingActions(prev => ({
+          ...prev,
+          [actionId]: { type, status: "success" }
+        }));
+      } else if (type === "query_database_logs") {
+        const limit = parseInt(attrs.limit || "10", 10);
+        setTerminalOutput(prev => [
+          ...prev,
+          `[DATABASE] Querying secure assistant transaction logs...`,
+          `[DATABASE] Filter: user_id matching Firebase UID`,
+          `[DATABASE] Order: created_at DESC, limit: ${limit}`
+        ]);
+        
+        setCurrentView("console"); // Switch view to console to show DB query activity
+        
         setProcessingActions(prev => ({
           ...prev,
           [actionId]: { type, status: "success" }
@@ -973,13 +1094,13 @@ Make sure to explain what you are doing matching your selected personality templ
 
   const fetchGmailEmails = async (accessToken: string) => {
     try {
-      const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5", {
+      const res = await googleApiProxy("https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5", {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
       const data = await res.json();
       if (data.messages) {
         const details = await Promise.all(data.messages.map(async (msg: any) => {
-          const detailRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}`, {
+          const detailRes = await googleApiProxy(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}`, {
             headers: { Authorization: `Bearer ${accessToken}` }
           });
           const detailData = await detailRes.json();
@@ -1006,7 +1127,7 @@ Make sure to explain what you are doing matching your selected personality templ
   const fetchCalendarEvents = async (accessToken: string) => {
     try {
       const timeMin = new Date().toISOString();
-      const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?orderBy=startTime&singleEvents=true&timeMin=${timeMin}&maxResults=5`, {
+      const res = await googleApiProxy(`https://www.googleapis.com/calendar/v3/calendars/primary/events?orderBy=startTime&singleEvents=true&timeMin=${timeMin}&maxResults=5`, {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
       const data = await res.json();
@@ -1029,7 +1150,7 @@ Make sure to explain what you are doing matching your selected personality templ
 
   const fetchGoogleTaskLists = async (accessToken: string) => {
     try {
-      const res = await fetch("https://tasks.googleapis.com/tasks/v1/users/@me/lists", {
+      const res = await googleApiProxy("https://tasks.googleapis.com/tasks/v1/users/@me/lists", {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
       const data = await res.json();
@@ -1047,7 +1168,7 @@ Make sure to explain what you are doing matching your selected personality templ
 
   const fetchGoogleTasks = async (accessToken: string, listId: string) => {
     try {
-      const res = await fetch(`https://tasks.googleapis.com/tasks/v1/lists/${listId}/tasks?showCompleted=true&maxResults=10`, {
+      const res = await googleApiProxy(`https://tasks.googleapis.com/tasks/v1/lists/${listId}/tasks?showCompleted=true&maxResults=10`, {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
       const data = await res.json();
@@ -1069,7 +1190,7 @@ Make sure to explain what you are doing matching your selected personality templ
 
   const fetchChatSpaces = async (accessToken: string) => {
     try {
-      const res = await fetch("https://chat.googleapis.com/v1/spaces", {
+      const res = await googleApiProxy("https://chat.googleapis.com/v1/spaces", {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
       const data = await res.json();
@@ -1090,7 +1211,7 @@ Make sure to explain what you are doing matching your selected personality templ
 
   const fetchChatMessages = async (accessToken: string, spaceName: string) => {
     try {
-      const res = await fetch(`https://chat.googleapis.com/v1/${spaceName}/messages?pageSize=20`, {
+      const res = await googleApiProxy(`https://chat.googleapis.com/v1/${spaceName}/messages?pageSize=20`, {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
       const data = await res.json();
@@ -1248,9 +1369,196 @@ Make sure to explain what you are doing matching your selected personality templ
   };
 
   // 4. Gemini Chat Communication with Jarvis Persona
+  const extractName = (input: string): string | null => {
+    const bnPatterns = [
+      /আমার নাম\s+([A-Za-z\u0980-\u09FF\s\d]{2,20})/i,
+      /আমাকে\s+([A-Za-z\u0980-\u09FF\s\d]{2,20})\s+নামে/i,
+      /আমাকে\s+([A-Za-z\u0980-\u09FF\s\d]{2,20})\s+ডাকো/i,
+      /আমার নাম হলো\s+([A-Za-z\u0980-\u09FF\s\d]{2,20})/i,
+      /আমার নাম হচ্ছে\s+([A-Za-z\u0980-\u09FF\s\d]{2,20})/i,
+      /আমি\s+([A-Za-z\u0980-\u09FF\s\d]{2,20})/i
+    ];
+    for (const regex of bnPatterns) {
+      const match = input.match(regex);
+      if (match && match[1]) {
+        const val = match[1].trim().replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "");
+        // Avoid matching "আমি একজন" or "আমি পেশায়" as a name
+        if (val.includes("একজন") || val.includes("পেশায়") || val.includes("পেশায়") || val.includes("থাকি") || val.includes("বাসা") || val.includes("লোকে")) {
+          continue;
+        }
+        if (val.length >= 2 && val.length < 30) return val;
+      }
+    }
+
+    const enPatterns = [
+      /my name is\s+([A-Za-z\s\d]{2,20})/i,
+      /set my name to\s+([A-Za-z\s\d]{2,20})/i,
+      /call me\s+([A-Za-z\s\d]{2,20})/i,
+      /i am\s+([A-Za-z\s\d]{2,20})/i
+    ];
+    for (const regex of enPatterns) {
+      const match = input.match(regex);
+      if (match && match[1]) {
+        const val = match[1].trim().replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "");
+        // Avoid common matching pitfalls
+        const lowerVal = val.toLowerCase();
+        if (
+          lowerVal === "here" || 
+          lowerVal === "online" || 
+          lowerVal.startsWith("a ") || 
+          lowerVal.startsWith("an ") || 
+          lowerVal.includes("developer") || 
+          lowerVal.includes("engineer") || 
+          lowerVal.includes("student") || 
+          lowerVal.includes("teacher")
+        ) {
+          continue;
+        }
+        if (val.length >= 2 && val.length < 30) return val;
+      }
+    }
+    return null;
+  };
+
+  const extractProfession = (input: string): string | null => {
+    const bnPatterns = [
+      /আমার পেশা\s+([A-Za-z\u0980-\u09FF\s\d]{2,30})/i,
+      /আমি একজন\s+([A-Za-z\u0980-\u09FF\s\d]{2,30})/i,
+      /আমার পেশা হচ্ছে\s+([A-Za-z\u0980-\u09FF\s\d]{2,30})/i,
+      /আমি পেশায়\s+([A-Za-z\u0980-\u09FF\s\d]{2,30})/i,
+      /আমি পেশায়\s+([A-Za-z\u0980-\u09FF\s\d]{2,30})/i
+    ];
+    for (const regex of bnPatterns) {
+      const match = input.match(regex);
+      if (match && match[1]) {
+        const val = match[1].trim().replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "");
+        if (val.length >= 2 && val.length < 40) return val;
+      }
+    }
+
+    const enPatterns = [
+      /my profession is\s+([A-Za-z\s\d]{2,30})/i,
+      /set my profession to\s+([A-Za-z\s\d]{2,30})/i,
+      /i am a\s+([A-Za-z\s\d]{2,30})/i,
+      /i am an\s+([A-Za-z\s\d]{2,30})/i,
+      /i work as a\s+([A-Za-z\s\d]{2,30})/i,
+      /i work as an\s+([A-Za-z\s\d]{2,30})/i
+    ];
+    for (const regex of enPatterns) {
+      const match = input.match(regex);
+      if (match && match[1]) {
+        const val = match[1].trim().replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "");
+        if (val.length >= 2 && val.length < 40) return val;
+      }
+    }
+    return null;
+  };
+
+  const extractLocation = (input: string): string | null => {
+    const bnPatterns = [
+      /আমার লোকেশন\s+([A-Za-z\u0980-\u09FF\s\d]{2,30})/i,
+      /আমার ঠিকানা\s+([A-Za-z\u0980-\u09FF\s\d]{2,30})/i,
+      /আমি\s+([A-Za-z\u0980-\u09FF\s\d]{2,30})\s*-?তে থাকি/i,
+      /আমি\s+([A-Za-z\u0980-\u09FF\s\d]{2,30})\s+থাকি/i,
+      /আমার বাসা\s+([A-Za-z\u0980-\u09FF\s\d]{2,30})/i,
+      /আমার লোকেশন হচ্ছে\s+([A-Za-z\u0980-\u09FF\s\d]{2,30})/i
+    ];
+    for (const regex of bnPatterns) {
+      const match = input.match(regex);
+      if (match && match[1]) {
+        const val = match[1].trim().replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "");
+        if (val.length >= 2 && val.length < 40) return val;
+      }
+    }
+
+    const enPatterns = [
+      /my location is\s+([A-Za-z\s\d]{2,30})/i,
+      /set my location to\s+([A-Za-z\s\d]{2,30})/i,
+      /i live in\s+([A-Za-z\s\d]{2,30})/i,
+      /i am from\s+([A-Za-z\s\d]{2,30})/i
+    ];
+    for (const regex of enPatterns) {
+      const match = input.match(regex);
+      if (match && match[1]) {
+        const val = match[1].trim().replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "");
+        if (val.length >= 2 && val.length < 40) return val;
+      }
+    }
+    return null;
+  };
+
+  const checkForAutoConfigUpdates = (text: string): SystemSettings | null => {
+    let updated = false;
+    let apiKeyUpdated = false;
+    const newSettings = { ...systemSettings };
+
+    // 1. API Key
+    const apiKeyMatch = text.match(/(AIzaSy[A-Za-z0-9_-]{33})/);
+    if (apiKeyMatch && apiKeyMatch[1]) {
+      const newKey = apiKeyMatch[1];
+      if (newSettings.geminiLiveApiKey !== newKey) {
+        newSettings.geminiLiveApiKey = newKey;
+        updated = true;
+        apiKeyUpdated = true;
+        setTerminalOutput(prev => [...prev, `[AUTO-CONFIG] New Gemini API Key parsed: ${newKey.substring(0, 8)}... saving to system vault...`]);
+      }
+    }
+
+    // 2. Name
+    const name = extractName(text);
+    if (name) {
+      if (newSettings.userName !== name) {
+        newSettings.userName = name;
+        updated = true;
+        setTerminalOutput(prev => [...prev, `[AUTO-CONFIG] Smart Profile: Extracted Name: "${name}". Saving details...`]);
+      }
+    }
+
+    // 3. Profession
+    const profession = extractProfession(text);
+    if (profession) {
+      if (newSettings.userProfession !== profession) {
+        newSettings.userProfession = profession;
+        updated = true;
+        setTerminalOutput(prev => [...prev, `[AUTO-CONFIG] Smart Profile: Extracted Profession: "${profession}". Saving details...`]);
+      }
+    }
+
+    // 4. Location
+    const location = extractLocation(text);
+    if (location) {
+      if (newSettings.userLocationName !== location) {
+        newSettings.userLocationName = location;
+        updated = true;
+        setTerminalOutput(prev => [...prev, `[AUTO-CONFIG] Smart Profile: Extracted Location: "${location}". Saving details...`]);
+      }
+    }
+
+    if (updated) {
+      saveSystemSettings(newSettings);
+
+      // If API Key has been updated/injected, automatically re-launch or launch the real-time voice session!
+      if (apiKeyUpdated) {
+        setTerminalOutput(prev => [...prev, `[AUTO-CONFIG] Live API Key detected. Relaunching Real-Time Voice Uplink Service...`]);
+        stopLiveVoiceSession();
+        setTimeout(() => {
+          startLiveVoiceSession();
+        }, 1000);
+      }
+
+      return newSettings;
+    }
+    return null;
+  };
+
+
   const handleSendMessage = async (textToSend?: string, customImage?: string) => {
     const text = textToSend || inputMessage;
     if (!text.trim() && !customImage) return;
+
+    // Run auto-config extraction!
+    const updatedSettings = checkForAutoConfigUpdates(text);
+    const activeSettings = updatedSettings || systemSettings;
 
     // Interrupt any active TTS output and capture user gesture synchronously
     if (ttsPlayerRef.current) {
@@ -1260,7 +1568,7 @@ Make sure to explain what you are doing matching your selected personality templ
     try { ttsPlayerRef.current.init(); } catch (e) {}
 
     // Gentle terminal status update if API key or name is missing, but non-blocking
-    const isProfileUnset = !systemSettings.geminiLiveApiKey || !systemSettings.userName;
+    const isProfileUnset = !activeSettings.geminiLiveApiKey || !activeSettings.userName;
     if (isProfileUnset) {
       setTerminalOutput(prev => [
         ...prev,
@@ -1285,7 +1593,7 @@ Make sure to explain what you are doing matching your selected personality templ
     setChatMessages(prev => [...prev, userMsg]);
     setInputMessage("");
     setAudioBlobUrl(null);
-    setIsGenerating(true);
+    transitionToState(VoiceChatState.GENERATING_REPLY);
 
     try {
       const history = [...chatMessages, userMsg].map(m => ({
@@ -1299,7 +1607,7 @@ Make sure to explain what you are doing matching your selected personality templ
         method: "POST",
         headers: { 
           "Content-Type": "application/json",
-          "x-gemini-api-key": systemSettings.geminiLiveApiKey || ""
+          "x-gemini-api-key": activeSettings.geminiLiveApiKey || ""
         },
         body: JSON.stringify({
           messages: history,
@@ -1307,9 +1615,9 @@ Make sure to explain what you are doing matching your selected personality templ
           thinkingMode,
           grounding: groundingMode,
           userLocation,
-          language: systemSettings.language,
-          customSystemInstruction: getCompiledSystemInstruction(systemSettings),
-          apiConnections: systemSettings.apiConnections
+          language: activeSettings.language,
+          customSystemInstruction: getCompiledSystemInstruction(activeSettings),
+          apiConnections: activeSettings.apiConnections
         })
       });
 
@@ -1321,6 +1629,10 @@ Make sure to explain what you are doing matching your selected personality templ
       let replyText = data.text || "";
       let hasPlayCall = false;
       let playQuery = "";
+      let hasOpenWebCall = false;
+      let webUrl = "";
+      let hasGenerateImageCall = false;
+      let imagePromptText = "";
 
       if (data.functionCalls && data.functionCalls.length > 0) {
         for (const call of data.functionCalls) {
@@ -1337,6 +1649,36 @@ Make sure to explain what you are doing matching your selected personality templ
                 `[FUNCTION CALL] play_video_on_screen triggered with query: "${query}"`
               ]);
             }
+          } else if (call.name === "open_web") {
+            const url = call.args?.url;
+            if (url) {
+              hasOpenWebCall = true;
+              webUrl = url;
+              setSandboxActiveTab("browser");
+              setSandboxBrowserUrl(url);
+              setShowCyberDeck(true);
+              setTerminalOutput(prev => [
+                ...prev,
+                `[FUNCTION CALL] open_web triggered with URL: "${url}"`
+              ]);
+            }
+          } else if (call.name === "generate_image") {
+            const promptVal = call.args?.prompt;
+            if (promptVal) {
+              hasGenerateImageCall = true;
+              imagePromptText = promptVal;
+              setImagePrompt(promptVal);
+              setSandboxActiveTab("image");
+              setShowCyberDeck(true);
+              setTerminalOutput(prev => [
+                ...prev,
+                `[FUNCTION CALL] generate_image triggered with prompt: "${promptVal}"`
+              ]);
+              // Trigger actual image generation on client
+              setTimeout(() => {
+                handleGenerateImage(promptVal);
+              }, 200);
+            }
           }
         }
       }
@@ -1347,6 +1689,24 @@ Make sure to explain what you are doing matching your selected personality templ
         }
         if (!replyText.includes('<action type="play_youtube"')) {
           replyText += `\n\n<action type="play_youtube" query="${playQuery}" />`;
+        }
+      }
+
+      if (hasOpenWebCall) {
+        if (!replyText.trim()) {
+          replyText = `Sure Boss, opening "${webUrl}" in the Sandbox browser right now.`;
+        }
+        if (!replyText.includes('<action type="open_web"')) {
+          replyText += `\n\n<action type="open_web" url="${webUrl}" />`;
+        }
+      }
+
+      if (hasGenerateImageCall) {
+        if (!replyText.trim()) {
+          replyText = `Sure Boss, generating an image for "${imagePromptText}" right now.`;
+        }
+        if (!replyText.includes('<action type="generate_image"')) {
+          replyText += `\n\n<action type="generate_image" prompt="${imagePromptText}" />`;
         }
       }
 
@@ -1444,7 +1804,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
         timestamp: new Date()
       }]);
     } finally {
-      setIsGenerating(false);
+      transitionToState(ttsEnabled ? VoiceChatState.SPEAKING_REPLY : VoiceChatState.IDLE);
     }
   };
 
@@ -1487,23 +1847,23 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
       };
 
       mediaRecorder.start();
-      setIsRecording(true);
+      transitionToState(VoiceChatState.TRANSCRIBING_INPUT_RECORDING);
     } catch (err) {
       console.error("Mic Access Error:", err);
     }
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
+    if (mediaRecorderRef.current && voiceChatState === VoiceChatState.TRANSCRIBING_INPUT_RECORDING) {
       mediaRecorderRef.current.stop();
-      setIsRecording(false);
+      transitionToState(VoiceChatState.TRANSCRIBING_INPUT_PROCESSING);
       // Stop stream tracks
       mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
     }
   };
 
   const transcribeAudio = async (base64Audio: string) => {
-    setIsGenerating(true);
+    transitionToState(VoiceChatState.TRANSCRIBING_INPUT_PROCESSING);
     try {
       const res = await fetch("/api/gemini/transcribe", {
         method: "POST",
@@ -1521,7 +1881,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
       console.error("Audio Transcription Failed:", err);
       showApiError("Audio Transcription Failed", err.message || "Unknown error transcribing microphone input.");
     } finally {
-      setIsGenerating(false);
+      transitionToState(VoiceChatState.IDLE);
     }
   };
 
@@ -1593,21 +1953,84 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
       const data = await res.json();
       if (data.audio && ttsPlayerRef.current) {
         // Play back PCM
+        transitionToState(VoiceChatState.SPEAKING_REPLY);
         ttsPlayerRef.current.playChunk(data.audio);
+        
+        // Estimate speech duration based on text length and set fallback to return to IDLE
+        const wordCount = cleanText.split(/\s+/).length;
+        const durationMs = Math.max(3000, wordCount * 450); // ~130 words per minute average with cushion
+        setTimeout(() => {
+          setVoiceChatState(prev => prev === VoiceChatState.SPEAKING_REPLY ? VoiceChatState.IDLE : prev);
+        }, durationMs);
       }
     } catch (err) {
       console.error("TTS Output Error:", err);
     }
   };
 
+  const triggerVoiceApiKeyFallback = (errorMessage?: string) => {
+    if (silentCheckTimeoutRef.current) {
+      clearTimeout(silentCheckTimeoutRef.current);
+      silentCheckTimeoutRef.current = null;
+    }
+    
+    // Sever current session
+    transitionToState(VoiceChatState.IDLE);
+    cleanupAudioResources();
+
+    const hasExistingKey = !!systemSettings.geminiLiveApiKey;
+    const fallbackText = hasExistingKey
+      ? `স্যার, আপনার লাইভ ভয়েস কানেকশন স্থাপন করা সম্ভব হয়নি। ত্রুটি: ${errorMessage || "কানেকশন টাইমআউট বা নেটওয়ার্ক সমস্যা"}। দয়া করে সেটিংস থেকে আপনার এপিআই কি-টি সঠিক কিনা তা নিশ্চিত করুন।`
+      : "স্যার, আপনার নিজস্ব Gemini API Key-টি সরাসরি এখানে চ্যাট বক্সে দিন বা মুখে বলুন, আমি এখনই বাকি সেটআপ সম্পন্ন করে দিচ্ছি।";
+    
+    setChatMessages(prev => {
+      if (prev.length > 0 && prev[prev.length - 1].content === fallbackText) {
+        return prev;
+      }
+      return [
+        ...prev,
+        {
+          id: `fallback-sys-${Date.now()}`,
+          role: "assistant",
+          content: fallbackText,
+          timestamp: new Date()
+        }
+      ];
+    });
+    
+    speakResponse(fallbackText);
+    
+    setTerminalOutput(prev => [
+      ...prev,
+      `[VOICE STANDBY] Auto-recovery: ${hasExistingKey ? "Reported connection failure: " + (errorMessage || "timeout") : "Personal API Key requested from user to complete high-fidelity voice link."}`
+    ]);
+  };
+
   // 7. Live Voice Conversation Bridge (WebSocket stream)
   const startLiveVoiceSession = async () => {
-    if (liveVoiceActive) return;
+    if (voiceChatState === VoiceChatState.LIVE_SESSION_CONNECTING || voiceChatState === VoiceChatState.LIVE_SESSION_CONNECTED) return;
     setLiveSessionError(null);
     liveAssistantTextBufferRef.current = ""; // Reset buffer at session start
     setLiveTextTranscript(["Initializing real-time audio bridge...", "Status: Dialing central server..."]);
     setTerminalOutput(prev => [...prev, "[VOICE] Initializing real-time voice audio bridge...", "[VOICE] Requesting microphone permission & dialing central uplink..."]);
-    setLiveWsStatus("connecting");
+    transitionToState(VoiceChatState.LIVE_SESSION_CONNECTING);
+
+    // 1. Smart Safety Net: We do not block connection even if geminiLiveApiKey is not set in local settings,
+    // as the backend server will automatically fall back to the system-wide GEMINI_API_KEY or GEMINI_API_KEY_BAC.
+    // If neither exists or the key is rejected, the backend returns an error and triggerVoiceApiKeyFallback() runs.
+
+    if (silentCheckTimeoutRef.current) {
+      clearTimeout(silentCheckTimeoutRef.current);
+      silentCheckTimeoutRef.current = null;
+    }
+
+    // Set a robust 8-second silent safety net timeout for the full two-hop network handshake to complete.
+    // Real errors (like invalid keys or exhausted quotas) are handled instantly via the "error" packet sent from the backend,
+    // so this longer timeout only serves as a fallback for absolute connection drops or network freezes.
+    silentCheckTimeoutRef.current = setTimeout(() => {
+      console.warn("[SAFETY NET] Live connection did not establish 'ready' status within 8000ms. Triggering auto-recovery.");
+      triggerVoiceApiKeyFallback("লাইভ সার্ভার থেকে রেসপন্স পেতে দেরি হচ্ছে (Handshake Timeout)");
+    }, 8000);
 
     // Initialize Audio Contexts synchronously on user click to bypass browser autoplay policies
     try {
@@ -1634,6 +2057,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
         // Send setup parameters immediately over the WebSocket connection
         ws.send(JSON.stringify({
           type: "setup",
+          uid: user?.uid || "",
           language: systemSettings.language,
           voice: systemSettings.voicePersona,
           systemInstruction: getCompiledSystemInstruction(systemSettings),
@@ -1645,8 +2069,12 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
       ws.onmessage = async (event) => {
         const payload = JSON.parse(event.data);
         if (payload.type === "ready") {
-          setLiveWsStatus("connected");
-          setLiveVoiceActive(true);
+          // Success! Clear the silent safety net connection timeout
+          if (silentCheckTimeoutRef.current) {
+            clearTimeout(silentCheckTimeoutRef.current);
+            silentCheckTimeoutRef.current = null;
+          }
+          transitionToState(VoiceChatState.LIVE_SESSION_CONNECTED);
           setLiveTextTranscript(prev => [...prev, "Status: Core Uplink Established. Ready to speak, Boss."]);
           setTerminalOutput(prev => [...prev, "[VOICE] Core Uplink Established successfully! Jarvis is listening to your microphone..."]);
 
@@ -1685,7 +2113,6 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
         }
         if (payload.type === "toolCall" && payload.toolCall?.functionCalls) {
           for (const call of payload.toolCall.functionCalls) {
-            const actionId = `voice-tool-${Date.now()}-${Math.random().toString(36).substring(4)}`;
             let type = "";
             const attrs: Record<string, string> = {};
 
@@ -1702,11 +2129,43 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
               type = "run_code";
               attrs.title = call.args?.title || "";
               attrs.code = call.args?.code || "";
+            } else if (call.name === "query_database_logs") {
+              type = "query_database_logs";
+              attrs.limit = (call.args?.limit || 10).toString();
             }
 
             if (type) {
               console.log("Executing Live API Tool Call:", type, attrs);
-              executeSandboxAction(actionId, type, attrs);
+              
+              const msgId = `live-ai-tool-${Date.now()}-${Math.random().toString(36).substring(4)}`;
+              const attrsString = Object.entries(attrs)
+                .map(([k, v]) => `${k}="${v.replace(/"/g, '&quot;')}"`)
+                .join(" ");
+
+              let friendlyText = "";
+              if (type === "play_youtube") {
+                friendlyText = `🤖 [SYSTEM ACTION TRIGGERED] playing YouTube video matching query: "${attrs.query}"`;
+              } else if (type === "open_web") {
+                friendlyText = `🤖 [SYSTEM ACTION TRIGGERED] opening sandbox web view: "${attrs.url}"`;
+              } else if (type === "generate_image") {
+                friendlyText = `🤖 [SYSTEM ACTION TRIGGERED] generating image for prompt: "${attrs.prompt}"`;
+              } else if (type === "run_code") {
+                friendlyText = `🤖 [SYSTEM ACTION TRIGGERED] executing system script: "${attrs.title}"`;
+              } else if (type === "query_database_logs") {
+                friendlyText = `🤖 [SYSTEM ACTION TRIGGERED] querying secure database for previous conversation records (limit: ${attrs.limit})`;
+              }
+
+              const actionMessage: Message = {
+                id: msgId,
+                role: "assistant",
+                content: `${friendlyText}\n\n<action type="${type}" ${attrsString} />`,
+                timestamp: new Date(),
+                modelUsed: "gemini-3.1-flash-live-preview (Voice Tool)"
+              };
+              setChatMessages(prev => [...prev, actionMessage]);
+              
+              // Directly execute the action matching the parsed ID
+              executeSandboxAction(`${msgId}-0`, type, attrs);
             }
           }
         }
@@ -1723,6 +2182,9 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
             setChatMessages(prev => [...prev, newUserMsg]);
             setLiveTextTranscript(prev => [...prev, `User: ${userStr}`]);
             setTerminalOutput(prev => [...prev, `[USER] ${userStr}`]);
+
+            // Check for voice-driven auto-configuration updates!
+            checkForAutoConfigUpdates(userStr);
             
             // Start a new utterance response message ID
             liveMessageIdRef.current = `live-ai-${Date.now()}-${Math.random()}`;
@@ -1784,7 +2246,6 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
             const matchedTag = match[0];
             const type = match[1];
             const attrsRaw = match[2];
-            const actionId = `voice-${Date.now()}-${Math.random().toString(36).substring(4)}`;
 
             // Extract attributes manually
             const attrs: Record<string, string> = {};
@@ -1795,7 +2256,6 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
             }
 
             console.log("Extracted Voice Action from buffer:", type, attrs);
-            executeSandboxAction(actionId, type, attrs);
 
             // Strip the executed tag from the buffer to prevent double triggers
             liveAssistantTextBufferRef.current = liveAssistantTextBufferRef.current.replace(matchedTag, "");
@@ -1810,13 +2270,42 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
               return copy;
             });
 
-            // Update in chatMessages as well
+            // Update in chatMessages as well (removes the action tag from the current streaming text message)
             setChatMessages(prev => prev.map(m => {
               if (m.id === liveMessageIdRef.current) {
                 return { ...m, content: liveAssistantTextBufferRef.current.trim() };
               }
               return m;
             }));
+
+            // Create a dedicated action bubble so it displays perfectly in the chat list
+            const msgId = `live-ai-voice-action-${Date.now()}-${Math.random().toString(36).substring(4)}`;
+            const attrsString = Object.entries(attrs)
+              .map(([k, v]) => `${k}="${v.replace(/"/g, '&quot;')}"`)
+              .join(" ");
+
+            let friendlyText = "";
+            if (type === "play_youtube") {
+              friendlyText = `🤖 [SYSTEM ACTION TRIGGERED] playing YouTube video matching query: "${attrs.query}"`;
+            } else if (type === "open_web") {
+              friendlyText = `🤖 [SYSTEM ACTION TRIGGERED] opening sandbox web view: "${attrs.url}"`;
+            } else if (type === "generate_image") {
+              friendlyText = `🤖 [SYSTEM ACTION TRIGGERED] generating image for prompt: "${attrs.prompt}"`;
+            } else if (type === "run_code") {
+              friendlyText = `🤖 [SYSTEM ACTION TRIGGERED] executing system script: "${attrs.title}"`;
+            }
+
+            const actionMessage: Message = {
+              id: msgId,
+              role: "assistant",
+              content: `${friendlyText}\n\n<action type="${type}" ${attrsString} />`,
+              timestamp: new Date(),
+              modelUsed: "gemini-3.1-flash-live-preview (Voice Action)"
+            };
+            setChatMessages(prev => [...prev, actionMessage]);
+
+            // Directly execute the action matching the parsed ID
+            executeSandboxAction(`${msgId}-0`, type, attrs);
           }
         }
         if (payload.type === "interrupted") {
@@ -1826,45 +2315,53 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           setTerminalOutput(prev => [...prev, "[VOICE] Response generation interrupted."]);
         }
         if (payload.type === "error") {
+          if (silentCheckTimeoutRef.current) {
+            clearTimeout(silentCheckTimeoutRef.current);
+            silentCheckTimeoutRef.current = null;
+          }
           setLiveTextTranscript(prev => [...prev, `[ERROR]: ${payload.message}`]);
           setLiveSessionError(payload.message);
           setTerminalOutput(prev => [...prev, `[ERROR] ${payload.message}`]);
           showApiError("Gemini Live Link Failure", payload.message || "Uplink connection failed.");
 
-          // Stream error directly to the chat messages list for visibility!
-          const errorMsgId = `live-error-${Date.now()}`;
-          setChatMessages(prev => [
-            ...prev,
-            {
-              id: errorMsgId,
-              role: "assistant",
-              content: payload.message,
-              timestamp: new Date()
-            }
-          ]);
+          // Since the server returned an error (likely quota/key), trigger the elegant recovery guide!
+          triggerVoiceApiKeyFallback(payload.message);
         }
       };
 
       ws.onclose = () => {
-        cleanupAudioResources();
-        setLiveVoiceActive(false);
-        setLiveWsStatus("disconnected");
+        if (silentCheckTimeoutRef.current) {
+          clearTimeout(silentCheckTimeoutRef.current);
+          silentCheckTimeoutRef.current = null;
+        }
+        transitionToState(VoiceChatState.IDLE);
       };
 
       ws.onerror = (err) => {
-        console.error("Live Web socket error:", err);
-        const errMsg = "Failed to establish real-time socket link with local server. Please check your network connection or backend state.";
-        setLiveSessionError(errMsg);
-        showApiError("Uplink Connection Failed", errMsg);
-      };
+         console.error("Live Web socket error:", err);
+         if (silentCheckTimeoutRef.current) {
+           clearTimeout(silentCheckTimeoutRef.current);
+           silentCheckTimeoutRef.current = null;
+         }
+         const errMsg = "Failed to establish real-time socket link with local server. Please check your network connection or backend state.";
+         setLiveSessionError(errMsg);
+         showApiError("Uplink Connection Failed", errMsg);
+         
+         // Error on websocket connection -> Trigger elegant recovery
+         triggerVoiceApiKeyFallback("রিয়েল-টাইম সকেট লিংক সংযোগ করতে ব্যর্থ হয়েছে।");
+       };
 
     } catch (err: any) {
-      console.error("Live Web socket setup failed:", err);
-      setLiveWsStatus("disconnected");
-      const errMsg = err?.message || "Failed to establish real-time socket link with local server.";
-      setLiveSessionError(errMsg);
-      showApiError("Voice Initialization Error", errMsg);
-    }
+       console.error("Live Web socket setup failed:", err);
+       if (silentCheckTimeoutRef.current) {
+         clearTimeout(silentCheckTimeoutRef.current);
+         silentCheckTimeoutRef.current = null;
+       }
+       const errMsg = err?.message || "Failed to establish real-time socket link with local server.";
+       setLiveSessionError(errMsg);
+       showApiError("Voice Initialization Error", errMsg);
+       triggerVoiceApiKeyFallback(errMsg);
+     }
   };
 
   const cleanupAudioResources = () => {
@@ -1887,10 +2384,12 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
   };
 
   const stopLiveVoiceSession = () => {
-    setLiveVoiceActive(false);
-    setLiveWsStatus("disconnected");
+    if (silentCheckTimeoutRef.current) {
+      clearTimeout(silentCheckTimeoutRef.current);
+      silentCheckTimeoutRef.current = null;
+    }
+    transitionToState(VoiceChatState.IDLE);
     setLiveSessionError(null);
-    cleanupAudioResources();
     liveMessageIdRef.current = null;
     lastUserTranscriptRef.current = "";
     setLiveTextTranscript(prev => [...prev, "Real-time audio bridge offline."]);
@@ -1925,7 +2424,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           .replace(/\//g, "_")
           .replace(/=+$/, "");
 
-        const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+        const res = await googleApiProxy("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
           method: "POST",
           headers: {
             Authorization: `Bearer ${token}`,
@@ -1942,7 +2441,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
         }
 
       } else if (type === "create_event") {
-        const res = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+        const res = await googleApiProxy("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
           method: "POST",
           headers: {
             Authorization: `Bearer ${token}`,
@@ -1964,7 +2463,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
         }
 
       } else if (type === "create_task") {
-        const res = await fetch(`https://tasks.googleapis.com/tasks/v1/lists/${selectedTaskList}/tasks`, {
+        const res = await googleApiProxy(`https://tasks.googleapis.com/tasks/v1/lists/${selectedTaskList}/tasks`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${token}`,
@@ -1985,7 +2484,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
         }
 
       } else if (type === "complete_task") {
-        const res = await fetch(`https://tasks.googleapis.com/tasks/v1/lists/${selectedTaskList}/tasks/${payload.taskId}`, {
+        const res = await googleApiProxy(`https://tasks.googleapis.com/tasks/v1/lists/${selectedTaskList}/tasks/${payload.taskId}`, {
           method: "PATCH",
           headers: {
             Authorization: `Bearer ${token}`,
@@ -2003,7 +2502,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           throw new Error("Tasks patch failed.");
         }
       } else if (type === "create_meet") {
-        const res = await fetch("https://meet.googleapis.com/v2/spaces", {
+        const res = await googleApiProxy("https://meet.googleapis.com/v2/spaces", {
           method: "POST",
           headers: {
             Authorization: `Bearer ${token}`,
@@ -2037,7 +2536,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           setTerminalOutput(prev => [...prev, `[MEET] Create API returned error, but provisioned standard Meet Room Code: ${mockCode}`]);
         }
       } else if (type === "send_chat") {
-        const res = await fetch(`https://chat.googleapis.com/v1/${selectedChatSpace}/messages`, {
+        const res = await googleApiProxy(`https://chat.googleapis.com/v1/${selectedChatSpace}/messages`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${token}`,
@@ -2066,19 +2565,9 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
   };
 
   // 9. Generate High Quality Images (Image Workshop)
-  const handleGenerateImage = async () => {
-    const isProfileIncomplete = !systemSettings.geminiLiveApiKey || 
-                                !systemSettings.userName || 
-                                !systemSettings.userProfession || 
-                                !systemSettings.userLocationName || 
-                                !systemSettings.userBio;
-    if (isProfileIncomplete) {
-      alert("দুঃখিত স্যার, আপনার প্রোফাইল সেটিংস সম্পূর্ণ না হওয়া পর্যন্ত আমি ইমেজ জেনারেট করতে পারবো না। দয়া করে সেটিংস থেকে আপনার API Key ও সমস্ত তথ্য সম্পূর্ণ করুন।\n\n(Sir, profile incomplete. Please set your API key and complete all profile information in Settings first.)");
-      setShowSystemConfig(true);
-      return;
-    }
-
-    if (!imagePrompt.trim()) return;
+  const handleGenerateImage = async (overridePrompt?: string) => {
+    const promptToUse = overridePrompt || imagePrompt;
+    if (!promptToUse.trim()) return;
     setImageWorkshopLoading(true);
     setGeneratedImageUrl(null);
 
@@ -2090,7 +2579,7 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           "x-gemini-api-key": systemSettings.geminiLiveApiKey || ""
         },
         body: JSON.stringify({
-          prompt: imagePrompt,
+          prompt: promptToUse,
           model: imageModel,
           aspectRatio: imageAspectRatio,
           imageSize,
@@ -2149,17 +2638,6 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
     }
     ttsPlayerRef.current = new PCMPlayer(24000);
     try { ttsPlayerRef.current.init(); } catch (e) {}
-
-    const isProfileIncomplete = !systemSettings.geminiLiveApiKey || 
-                                !systemSettings.userName || 
-                                !systemSettings.userProfession || 
-                                !systemSettings.userLocationName || 
-                                !systemSettings.userBio;
-    if (isProfileIncomplete) {
-      alert("দুঃখিত স্যার, আপনার প্রোফাইল সেটিংস সম্পূর্ণ না হওয়া পর্যন্ত আমি ইমেজ বিশ্লেষণ করতে পারবো না। দয়া করে সেটিংস থেকে আপনার API Key ও সমস্ত তথ্য সম্পূর্ণ করুন।\n\n(Sir, profile incomplete. Please set your API key and complete all profile information in Settings first.)");
-      setShowSystemConfig(true);
-      return;
-    }
 
     if (!uploadImageBase64) return;
     setIsGenerating(true);
@@ -2289,10 +2767,10 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
       <div className="absolute top-0 left-0 w-full h-full pointer-events-none scanline z-0"></div>
 
       {/* Floating Space Command Header */}
-      <header className="border-b border-cyan-500/20 bg-black/75 px-6 py-4 flex items-center justify-between relative z-10 backdrop-blur-md">
+      <header className="border-b border-cyan-500/30 bg-black/80 px-6 py-4 flex items-center justify-between relative z-10 backdrop-blur-lg shadow-[0_4px_25px_rgba(6,182,212,0.06)]">
         <div className="flex items-center gap-3">
           {/* Cybernetic Display Logo */}
-          <div className="w-10 h-10 bg-cyan-500/5 rounded-xl flex items-center justify-center border border-cyan-500/20 shadow-[0_0_12px_rgba(6,182,212,0.15)] animate-pulse-slow shrink-0">
+          <div className="w-10 h-10 bg-cyan-500/5 rounded-xl flex items-center justify-center border border-cyan-500/25 shadow-[0_0_12px_rgba(6,182,212,0.15)] animate-pulse-slow shrink-0">
             <svg className="w-6 h-6 stroke-cyan-400 fill-none" viewBox="0 0 24 24" strokeWidth="2.5">
               <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
             </svg>
@@ -2302,6 +2780,18 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
             <div className="text-[10px] text-cyan-400 font-orbitron font-semibold tracking-wider flex items-center gap-1.5 mt-0.5">
               <span className="w-1.5 h-1.5 bg-cyan-400 rounded-full shadow-[0_0_8px_#00f3ff] animate-ping"></span>
               <span>DEEP SPACE COMMAND</span>
+              <span className="h-2.5 w-px bg-cyan-500/30"></span>
+              {systemSettings.geminiLiveApiKey ? (
+                <span className="text-emerald-400 flex items-center gap-1 font-orbitron font-bold text-[9px] uppercase tracking-wider">
+                  <span className="w-1 h-1 bg-emerald-400 rounded-full"></span>
+                  API: SECURED
+                </span>
+              ) : (
+                <span className="text-amber-400 flex items-center gap-1 font-orbitron font-bold text-[9px] uppercase tracking-wider animate-pulse-slow" title="Using shared system credentials. You can set up your own key anytime in Settings or by telling Jarvis via voice!">
+                  <span className="w-1 h-1 bg-amber-400 rounded-full"></span>
+                  API: STANDBY
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -2325,12 +2815,12 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           <button
             id="start-voice-assistant-btn"
             onClick={(liveVoiceActive || liveWsStatus === "connecting") ? stopLiveVoiceSession : startLiveVoiceSession}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl font-orbitron text-[10px] font-black uppercase transition-all duration-300 cursor-pointer border ${
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-orbitron text-[10px] font-black uppercase transition-all duration-300 cursor-pointer border tracking-wider scale-100 hover:scale-[1.03] active:scale-95 ${
               liveWsStatus === "connecting"
-                ? "bg-amber-500/20 border-amber-500/50 text-amber-400 animate-pulse shadow-[0_0_15px_rgba(245,158,11,0.25)] scale-[1.02]"
+                ? "bg-amber-500/20 border-amber-500/50 text-amber-400 animate-pulse shadow-[0_0_15px_rgba(245,158,11,0.25)]"
                 : liveWsStatus === "connected"
-                  ? "bg-rose-500/20 hover:bg-rose-500/35 border-rose-500/50 text-rose-400 shadow-[0_0_18px_rgba(244,63,94,0.35)]"
-                  : "bg-emerald-500/15 hover:bg-emerald-500/30 border-emerald-500/30 hover:border-emerald-500 text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.15)] hover:shadow-[0_0_20px_rgba(16,185,129,0.35)]"
+                  ? "bg-rose-500/25 hover:bg-rose-500/40 border-rose-500 text-rose-300 shadow-[0_0_20px_rgba(244,63,94,0.4)]"
+                  : "bg-emerald-500/15 hover:bg-emerald-500/30 border-emerald-500/40 hover:border-emerald-500 text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.2)] hover:shadow-[0_0_25px_rgba(16,185,129,0.4)]"
             }`}
             title={liveWsStatus === "connected" ? "ভয়েস কানেকশন বন্ধ করুন (Disconnect Voice)" : "ভয়েস অ্যাসিস্ট্যান্ট শুরু করুন (Start Voice Assistant)"}
           >
@@ -2501,19 +2991,6 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
           <div className="flex-1 flex flex-col min-h-0">
             {/* Chat Messages Scrolling Thread */}
             <div className="flex-1 overflow-y-auto mb-3 border border-sky-500/10 bg-[#030816]/75 p-3 rounded-xl space-y-3 scrollbar-thin">
-              {!systemSettings.geminiLiveApiKey && (
-                <div className="border border-yellow-500/20 bg-yellow-500/5 rounded-xl p-3 flex items-start gap-2.5 relative overflow-hidden backdrop-blur-sm">
-                  <div className="absolute top-0 left-0 w-1 h-full bg-yellow-500"></div>
-                  <Sparkles className="w-4 h-4 text-yellow-500 shrink-0 mt-0.5 animate-pulse" />
-                  <div className="flex-1 text-left">
-                    <div className="text-[10px] font-bold text-yellow-400 font-mono uppercase tracking-wider mb-0.5">⚠️ CENTRAL GRID WARNING (Shared Uplink Active)</div>
-                    <p className="text-[10px] text-gray-300 leading-normal font-sans">
-                      You are currently using a shared free API key. Please <button onClick={() => setShowSystemConfig(true)} className="text-yellow-400 font-bold underline hover:text-yellow-300 transition bg-transparent border-none p-0 cursor-pointer">open Settings and add your own Gemini API Key</button>.
-                    </p>
-                  </div>
-                </div>
-              )}
-
               {chatMessages.length === 0 && (
                 <div className="flex flex-col items-center justify-center h-full text-center p-4 text-gray-500 space-y-2">
                   <div className="w-12 h-12 rounded-full border border-sky-500/20 flex items-center justify-center bg-[#070d1e]">
@@ -2616,6 +3093,26 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
 
             {/* Chat Inputs & Triggers */}
             <div className="bg-[#030816] border border-sky-500/15 p-3 rounded-xl space-y-2 shrink-0">
+              {!systemSettings.geminiLiveApiKey && (
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 p-2 rounded-lg bg-amber-500/5 border border-amber-500/10 text-left">
+                  <div className="flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0"></span>
+                    <span className="text-[10px] text-amber-400 font-mono leading-snug">
+                      {systemSettings.language === "Bengali" ? (
+                        <>এপিআই কী সংযুক্ত নেই। চ্যাট অথবা ভয়েসে আপনার <b>Gemini API Key</b> সরাসরি বললে বা লিখলে জারভিস তা অটো-সেটআপ করে নেবে!</>
+                      ) : (
+                        <>API Key not connected. Type or say your <b>Gemini API Key</b> directly to auto-configure!</>
+                      )}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setShowSystemConfig(true)}
+                    className="px-2 py-0.5 rounded bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 text-[9px] font-mono shrink-0 cursor-pointer transition uppercase tracking-wider"
+                  >
+                    {systemSettings.language === "Bengali" ? "ম্যানুয়াল সেটআপ" : "Setup Manual"}
+                  </button>
+                </div>
+              )}
               {uploadImageBase64 && (
                 <div className="flex items-center gap-2 p-1.5 border border-sky-500/15 bg-gray-950 rounded-lg max-w-xs relative text-left">
                   <img src={`data:${uploadImageMime};base64,${uploadImageBase64}`} alt="preview" className="w-10 h-10 rounded object-cover" />
@@ -2896,30 +3393,6 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
 
                 {/* Chat Thread */}
                 <div className="flex-1 overflow-y-auto mb-4 border border-sky-500/10 bg-[#030816]/75 p-4 rounded-2xl space-y-4">
-                  {!systemSettings.geminiLiveApiKey && (
-                    <div className="border border-yellow-500/20 bg-yellow-500/5 rounded-2xl p-4 flex items-start gap-3 relative overflow-hidden backdrop-blur-sm">
-                      <div className="absolute top-0 left-0 w-1 h-full bg-yellow-500"></div>
-                      <Sparkles className="w-5 h-5 text-yellow-500 shrink-0 mt-0.5 animate-pulse" />
-                      <div className="flex-1 text-left">
-                        {systemSettings.language === "Bengali" ? (
-                          <>
-                            <div className="text-xs font-bold text-yellow-400 font-mono uppercase tracking-wider mb-1">⚠️ সেন্ট্রাল গ্রিড সতর্কতা (Shared Uplink Active)</div>
-                            <p className="text-[11px] text-gray-300 leading-relaxed font-sans">
-                              আপনি বর্তমানে একটি শেয়ারড ফ্রি এপিআই কি ব্যবহার করছেন, যা যেকোনো সময় ওভারলোড বা লিমিট শেষ হয়ে যেতে পারে। নিরবচ্ছিন্ন সার্ভিসের জন্য দয়া করে <button onClick={() => setShowSystemConfig(true)} className="text-yellow-400 font-bold underline hover:text-yellow-300 transition bg-transparent border-none p-0 cursor-pointer">এখানে ক্লিক করে সেটিংস থেকে আপনার নিজস্ব Gemini API Key যোগ করুন</button>।
-                            </p>
-                          </>
-                        ) : (
-                          <>
-                            <div className="text-xs font-bold text-yellow-400 font-mono uppercase tracking-wider mb-1">⚠️ CENTRAL GRID WARNING (Shared Uplink Active)</div>
-                            <p className="text-[11px] text-gray-300 leading-relaxed font-sans">
-                              You are currently using a shared free API key, which might get overloaded or hit limit. For uninterrupted service, please <button onClick={() => setShowSystemConfig(true)} className="text-yellow-400 font-bold underline hover:text-yellow-300 transition bg-transparent border-none p-0 cursor-pointer">click here to open Settings and add your own Gemini API Key</button>.
-                            </p>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
                   {chatMessages.length === 0 && (
                     <div className="flex flex-col items-center justify-center h-full text-center p-6 text-gray-400 space-y-3">
                       <div className="w-16 h-16 rounded-full border border-sky-500/20 flex items-center justify-center bg-[#070d1e]">
@@ -4562,6 +5035,18 @@ Once configured, I will be immediately ready to assist you again, Sir!`;
         setTerminalOutput={setTerminalOutput}
         sandboxBrowserUrl={sandboxBrowserUrl}
         setSandboxBrowserUrl={setSandboxBrowserUrl}
+      />
+
+      {/* ----------------- PERSISTENT VOICE ASSISTANT HUD ----------------- */}
+      <JarvisVoiceHUD
+        liveWsStatus={liveWsStatus}
+        liveVoiceActive={liveVoiceActive}
+        chatMessages={chatMessages}
+        stopLiveVoiceSession={stopLiveVoiceSession}
+        processingActions={processingActions}
+        setSandboxActiveTab={setSandboxActiveTab}
+        setShowCyberDeck={setShowCyberDeck}
+        setCurrentView={setCurrentView}
       />
 
       {/* ----------------- CUSTOM SYSTEM CONFIGURATION MODALS ----------------- */}
